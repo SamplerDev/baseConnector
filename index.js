@@ -1,41 +1,41 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const supabase = require('./db'); // Importamos la conexión a Supabase
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middlewares
 app.use(cors());
 app.use(express.json());
 
-// Endpoint de verificación de salud
-app.get('/health', (req, res) => {
-  res.status(200).json({ status: 'OK', service: 'WhatsApp Connector Gateway' });
-});
-
-// Endpoint principal para recibir Webhooks de WhatsApp (Evolution API / Meta)
-app.post('/webhook/whatsapp', async (req, res) => {
+// Endpoint de prueba conectando a Supabase
+app.get('/health', async (req, res) => {
   try {
-    const payload = req.body;
-    
-    // IMPORTANTE: Responder a WhatsApp de inmediato para evitar timeouts (HTTP 200)
-    res.status(200).json({ status: 'received' });
+    // Intenta consultar la tabla de ofertas
+    const { data, error } = await supabase.from('ofertas_publicadas').select('count', { count: 'exact' });
 
-    // Extraer datos básicos del mensaje
-    const sender = payload?.data?.key?.remoteJid || payload?.sender;
-    const messageText = payload?.data?.message?.conversation || payload?.message;
+    if (error) throw error;
 
-    console.log(`[Webhook Recibido] De: ${sender} | Mensaje: ${messageText}`);
-
-    // TODO: Aquí irá el enrutador para llamar a MariaDB y al microservicio en Render
-
-  } catch (error) {
-    console.error('Error procesando el webhook:', error);
+    res.status(200).json({
+      status: 'OK',
+      database: 'Supabase Conectado',
+      total_ofertas: data
+    });
+  } catch (err) {
+    res.status(200).json({
+      status: 'OK',
+      database: 'Error o tabla pendiente en Supabase',
+      details: err.message
+    });
   }
 });
 
-// Iniciar servidor
+// Endpoint del Webhook para WhatsApp
+app.post('/webhook/whatsapp', async (req, res) => {
+  res.status(200).json({ status: 'received' });
+});
+
 app.listen(PORT, () => {
-  console.log(`🚀 Servidor base corriendo en el puerto ${PORT}`);
+  console.log(`🚀 Servidor base corriendo en puerto ${PORT}`);
 });
