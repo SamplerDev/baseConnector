@@ -295,6 +295,9 @@ app.get('/health', async (req, res) => {
 // ==================================================================
 // 2. WEBHOOK ZERNIO: Recepción de Eventos
 // ==================================================================
+// ==================================================================
+// 2. WEBHOOK ZERNIO: Recepción de Eventos y Mensajes de WhatsApp
+// ==================================================================
 app.post('/webhook', verifyZernioSignature, async (req, res) => {
   log.info('WEBHOOK_IN', 'Payload completo recibido en /webhook:', req.body);
 
@@ -309,101 +312,135 @@ app.post('/webhook', verifyZernioSignature, async (req, res) => {
 
       log.info('WEBHOOK_PROC', `Procesando evento asíncrono [ID: ${eventId}]`);
 
-      // Filtrado por tipo de evento
       if (payload.event && payload.event !== 'message.received' && payload.event !== 'dm.received') {
         log.warn('WEBHOOK_SKIP', `Evento ignorado por no ser de mensaje: ${payload.event}`);
         return;
       }
 
-      // Deduplicación
+      // Deduplicación en Supabase
       if (await isMessageProcessed(eventId)) {
         log.warn('WEBHOOK_DEDUP', `⚠️ Evento duplicado omitido [ID: ${eventId}]`);
         return;
       }
       await markMessageAsProcessed(eventId);
 
-      // Normalización del mensaje
+      // Normalización de datos del mensaje
       const messageData = payload.message || payload.data || payload;
       const fromNumber = messageData.sender?.phoneNumber || messageData.from || messageData.sender;
-      const textBody = messageData.text || messageData.message || messageData.body || messageData.caption;
+      const textBody = messageData.text || messageData.message || messageData.body || messageData.caption || '';
       const conversationId = messageData.conversationId || payload.conversation?.id;
-// I
+
+      // Extraer URL de la imagen si fue enviada
+      let mediaUrl = null;
+      if (messageData.attachments && messageData.attachments.length > 0) {
+        mediaUrl = messageData.attachments[0].url || messageData.attachments[0].payload?.url;
+      }
 
       log.info('WEBHOOK_PARSED', 'Datos de mensaje extraídos:', {
         fromNumber,
         textBody,
-        hasAttachments: Boolean(messageData.attachments && messageData.attachments.length)
+        mediaUrl,
+        hasAttachments: Boolean(mediaUrl)
       });
 
-      if (!fromNumber || !textBody) {
-        log.warn('WEBHOOK_ABORT', 'No se detectó remitente o texto. Abortando flujo.');
+      if (!fromNumber || (!textBody && !mediaUrl)) {
+        log.warn('WEBHOOK_ABORT', 'No se detectó remitente ni contenido multimedia/texto. Abortando.');
         return;
       }
 
-      // Consulta de estado de la conversación (Human Takeover)
-      log.info('SUPABASE_QUERY', `Consultando bot_activo para el teléfono: ${fromNumber}`);
-      const { data: conv, error: convErr } = await supabase
-        .from('conversaciones')
-        .select('bot_activo')
-        .eq('phone_number', fromNumber)
-        .maybeSingle();
+      // Comprobar si el remitente es Administrador
+      const cleanFrom = String(fromNumber).replace(/\D/g, '');
+      const cleanAdmin = String(ADMIN_PHONE).replace(/\D/g, '');
+      const isAdmin = cleanFrom === cleanAdmin;
 
-      if (convErr) log.error('SUPABASE_ERR', 'Error buscando conversación', convErr);
+      log.info('AUTH_CHECK', `¿El remitente ${fromNumber} es Administrador?: ${isAdmin}`);
 
-      const botActivo = conv ? conv.bot_activo : true;
-      log.info('BOT_STATUS', `Estado del bot para ${fromNumber}: ${botActivo ? 'ACTIVADO' : 'PAUSADO'}`);
+      // ==================================================================
+      // A. FLUJO ADMINISTRADOR
+      // ==================================================================
+      if (isAdmin) {
+        // A.1. Confirmación de Ticket con #ID (Doble confirmación)
+        if (textBody && textBody.includes('#')) {
+          log.info('ADMIN_FLOW', `Confirmación de ticket recibida de Admin (${fromNumber}): ${textBody}`);
+          await axios.post(`http://localhost:${PORT}/api/webhook/admin-respuesta`, {
+            admin_phone: fromNumber,
+            admin_message: textBody
+          });
+        } 
+        // A.2. Extracción de Promo/Flyer (Texto, Imagen o Ambos)
+        else {
+          log.info('ADMIN_FLYER', `Nueva promo/flyer recibida de Admin (${fromNumber}). Enviando a Render...`);
 
-      // Registrar mensaje en el historial del usuario
-      log.info('SUPABASE_INSERT', `Guardando mensaje del usuario en chat_sesiones...`);
-      await supabase.from('chat_sesiones').insert([{
-        phone_number: fromNumber,
-        role: 'user',
-        content: textBody
-      }]);
+          // Avisar al Admin por WhatsApp que la IA está procesando
+          await sendZernioMessage(conversationId || fromNumber, "⏳ *Procesando flyer/promo con IA...* Dame unos segundos.");
 
-      // A. RESPUESTA DEL ADMINISTRADOR (Confirmación de ticket con #ID)
-      if (fromNumber === ADMIN_PHONE && textBody.includes('#')) {
-        log.info('ADMIN_FLOW', `Detectado mensaje de confirmación de ticket por Admin (${fromNumber}): ${textBody}`);
-        await axios.post(`http://localhost:${PORT}/api/webhook/admin-respuesta`, {
-          admin_phone: fromNumber,
-          admin_message: textBody
-        });
-      }
-      // B. CONSULTA DEL CLIENTE (Si el bot está activo)
-      else if (botActivo) {
-        log.info('CLIENT_FLOW', `Iniciando consulta de catálogo en Supabase...`);
-        const { data: catalogo, error: catErr } = await supabase
-          .from('ofertas_publicadas')
-          .select('id, destino, fecha_salida, descripcion, contacto, cupos')
-          .eq('activo', true)
-          .gt('cupos', 0);
+          // Llamada al agente multimodal en Render (Python + Gemini 2.5 Flash)
+          const extractionResponse = await pythonClient.post('/agent/extract-flyer', {
+            text_content: textBody,
+            image_url: mediaUrl
+          });
 
-        if (catErr) log.error('SUPABASE_CATALOG_ERR', 'Error obteniendo catálogo', catErr);
-        log.info('CATALOG_LOADED', `Ofertas activas encontradas: ${catalogo ? catalogo.length : 0}`);
+          const extraido = extractionResponse.data?.datos_extraidos || extractionResponse.data;
 
-        // Llamada a Gemini 2.5 Flash en Render
-        log.info('AI_AGENT', 'Enviando contexto y pregunta del cliente a Render (/agent/chat)...');
-        const aiResponse = await pythonClient.post('/agent/chat', {
-          user_message: textBody,
-          travel_catalog: catalogo || [],
-          history: []
-        });
+          const resumenAdmin = `📋 *OFERTA REGISTRADA EN BORRADOR*\n\n` +
+            `• *Destino:* ${extraido?.destino || 'No detectado'}\n` +
+            `• *Fecha Salida:* ${extraido?.fecha_salida || 'No detectada'}\n` +
+            `• *Precio:* ${extraido?.precio || 'A consultar'}\n` +
+            `• *Cupos:* ${extraido?.cupos || 'No especificado'}\n\n` +
+            `La oferta se guardó en *ofertas_borrador* en Supabase lista para revisar.`;
 
-        const respuestaIA = aiResponse.data.response;
-        log.success('AI_AGENT_RES', 'Respuesta generada por Gemini:', respuestaIA);
+          await sendZernioMessage(conversationId || fromNumber, resumenAdmin);
+        }
+      } 
+      // ==================================================================
+      // B. FLUJO CLIENTE (Consultas al Catálogo Publicado)
+      // ==================================================================
+      else {
+        // Consulta de estado de la conversación (Human Takeover)
+        const { data: conv } = await supabase
+          .from('conversaciones')
+          .select('bot_activo')
+          .eq('phone_number', fromNumber)
+          .maybeSingle();
 
-        // Guardar respuesta de IA en el historial
-        log.info('SUPABASE_INSERT', 'Guardando respuesta de IA en chat_sesiones...');
+        const botActivo = conv ? conv.bot_activo : true;
+
+        // Registrar mensaje en el historial del cliente
         await supabase.from('chat_sesiones').insert([{
           phone_number: fromNumber,
-          role: 'assistant',
-          content: respuestaIA
+          role: 'user',
+          content: textBody
         }]);
 
-        // Enviar respuesta al cliente vía Zernio
-        await sendZernioMessage(conversationId || fromNumber, respuestaIA);
-      } else {
-        log.warn('BOT_PAUSED', `El bot está pausado para ${fromNumber}. No se generó respuesta automática.`);
+        if (botActivo) {
+          log.info('CLIENT_FLOW', `Obteniendo catálogo publicado desde Supabase...`);
+          const { data: catalogo } = await supabase
+            .from('ofertas_publicadas')
+            .select('id, destino, fecha_salida, descripcion, contacto, cupos')
+            .eq('activo', true)
+            .gt('cupos', 0);
+
+          log.info('AI_AGENT', 'Enviando consulta del cliente a Render (/agent/chat)...');
+          const aiResponse = await pythonClient.post('/agent/chat', {
+            user_message: textBody,
+            travel_catalog: catalogo || [],
+            history: []
+          });
+
+          const respuestaIA = aiResponse.data.response;
+
+          // Guardar respuesta en el historial
+          await supabase.from('chat_sesiones').insert([{
+            phone_number: fromNumber,
+            role: 'assistant',
+            content: respuestaIA
+          }]);
+
+          // Responder al cliente
+          await sendZernioMessage(conversationId || fromNumber, respuestaIA);
+        } else {
+          log.warn('BOT_PAUSED', `Bot pausado para ${fromNumber}. Mensaje disponible en Dashboard.`);
+        }
       }
     } catch (err) {
       log.error('WEBHOOK_PROC_ERR', 'Error grave durante el procesamiento del Webhook', err);
