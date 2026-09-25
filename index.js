@@ -112,19 +112,37 @@ pythonClient.interceptors.response.use((response) => {
 // ==================================================================
 // FUNCIÓN AUXILIAR: Enviar Mensajes a través de Zernio API
 // ==================================================================
-async function sendZernioMessage(recipientPhone, text) {
-  const payload = {
-    accountId: ZERNIO_ACCOUNT_ID,
-    recipient: recipientPhone,
-    message: text
-  };
+async function sendZernioMessage(target, text) {
+  // Verificar si target es un conversationId (hexadecimal de 24 caracteres) o un teléfono
+  const isConversationId = typeof target === 'string' && target.length === 24 && !target.startsWith('+');
 
-  log.info('ZERNIO_SEND', `Iniciando envío de WhatsApp a ${recipientPhone}...`, payload);
+  let endpoint = '';
+  let payload = {};
+
+  if (isConversationId) {
+    // A. Envío directo dentro de una conversación activa
+    endpoint = `https://zernio.com/api/v1/inbox/conversations/${target}/messages`;
+    payload = {
+      accountId: ZERNIO_ACCOUNT_ID,
+      message: text
+    };
+  } else {
+    // B. Envío por número de teléfono (por ejemplo: ADMIN_PHONE o mensaje manual)
+    const participantId = String(target).replace(/\D/g, ''); // Deja solo dígitos
+    endpoint = `https://zernio.com/api/v1/inbox/conversations`;
+    payload = {
+      accountId: ZERNIO_ACCOUNT_ID,
+      participantId: participantId,
+      message: text
+    };
+  }
+
+  log.info('ZERNIO_SEND', `Iniciando envío a [${target}]...`, payload);
 
   try {
     const startTime = Date.now();
     const response = await axios.post(
-      'https://api.zernio.com/v1/inbox/messages',
+      endpoint,
       payload,
       {
         headers: {
@@ -134,13 +152,12 @@ async function sendZernioMessage(recipientPhone, text) {
       }
     );
     const duration = Date.now() - startTime;
-    log.success('ZERNIO_SEND_OK', `Mensaje entregado a ${recipientPhone} [${duration}ms]`, response.data);
+    log.success('ZERNIO_SEND_OK', `Mensaje entregado a [${target}] en ${duration}ms`, response.data);
     return response.data;
   } catch (err) {
-    log.error('ZERNIO_SEND_ERR', `Falla al enviar mensaje a ${recipientPhone} vía Zernio`, err.response?.data || err.message);
+    log.error('ZERNIO_SEND_ERR', `Falla enviando a [${target}]`, err.response?.data || err.message);
   }
 }
-
 // ==================================================================
 // MIDDLEWARES DE SEGURIDAD
 // ==================================================================
@@ -309,6 +326,8 @@ app.post('/webhook', verifyZernioSignature, async (req, res) => {
       const messageData = payload.message || payload.data || payload;
       const fromNumber = messageData.sender?.phoneNumber || messageData.from || messageData.sender;
       const textBody = messageData.text || messageData.message || messageData.body || messageData.caption;
+      const conversationId = messageData.conversationId || payload.conversation?.id;
+// I
 
       log.info('WEBHOOK_PARSED', 'Datos de mensaje extraídos:', {
         fromNumber,
@@ -382,7 +401,7 @@ app.post('/webhook', verifyZernioSignature, async (req, res) => {
         }]);
 
         // Enviar respuesta al cliente vía Zernio
-        await sendZernioMessage(fromNumber, respuestaIA);
+        await sendZernioMessage(conversationId || fromNumber, respuestaIA);
       } else {
         log.warn('BOT_PAUSED', `El bot está pausado para ${fromNumber}. No se generó respuesta automática.`);
       }
