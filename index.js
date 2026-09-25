@@ -43,13 +43,13 @@ log.info('ENV_CHECK', 'Estado de variables cargadas:', {
   PORT,
   ADMIN_PHONE: ADMIN_PHONE ? '✅ Configurado' : '❌ Faltante',
   PYTHON_AI_URL,
-  INTERNAL_API_KEY: INTERNAL_API_KEY ? '✅ Configurada' : '❌ Faltante',
+  INTERNAL_API_KEY: INTERNAL_API_KEY ? '✅ Configurada'  : '❌ Faltante',
   ADMIN_SECRET_KEY: ADMIN_SECRET_KEY ? '✅ Configurada' : '❌ Faltante',
   ZERNIO_API_KEY: ZERNIO_API_KEY ? '✅ Configurada' : '❌ Faltante',
   ZERNIO_ACCOUNT_ID: ZERNIO_ACCOUNT_ID ? '✅ Configurado' : '❌ Faltante',
   ZERNIO_WEBHOOK_SECRET: ZERNIO_WEBHOOK_SECRET ? '✅ Configurado' : '⚠️ Omitido / No configurado'
 });
-
+console.log(INTERNAL_API_KEY);
 const supabase = require('./db');
 if (!supabase) {
   log.error('SUPABASE', 'Error crítico: No se pudo instanciar el cliente de Supabase.');
