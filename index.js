@@ -369,29 +369,50 @@ app.post('/webhook', verifyZernioSignature, async (req, res) => {
         } 
         // A.2. Extracción de Promo/Flyer (Texto, Imagen o Ambos)
         else {
-          log.info('ADMIN_FLYER', `Nueva promo/flyer recibida de Admin (${fromNumber}). Enviando a Render...`);
+  log.info('ADMIN_FLYER', `Nueva promo/flyer recibida de Admin (${fromNumber})...`);
 
-          // Avisar al Admin por WhatsApp que la IA está procesando
-          await sendZernioMessage(conversationId || fromNumber, "⏳ *Procesando flyer/promo con IA...* Dame unos segundos.");
+  // Avisar al Admin por WhatsApp
+  await sendZernioMessage(conversationId || fromNumber, "⏳ *Procesando flyer/promo con IA...* Dame unos segundos.");
 
-          // Llamada al agente multimodal en Render (Python + Gemini 2.5 Flash)
-         const extractionResponse = await pythonClient.post('/agent/extract-flyer', {
-            text_content: textBody,
-            image_url: mediaUrl,
-            zernio_api_key: ZERNIO_API_KEY 
-          });
+  let imageBase64 = null;
+  let mimeType = 'image/jpeg';
 
-          const extraido = extractionResponse.data?.datos_extraidos || extractionResponse.data;
+  // Si hay imagen, Node.js la descarga directamente de Zernio
+  if (mediaUrl) {
+    try {
+      log.info('MEDIA_DOWNLOAD', `Descargando multimedia en Node.js desde Zernio...`);
+      const mediaResponse = await axios.get(mediaUrl, {
+        headers: { 'Authorization': `Bearer ${ZERNIO_API_KEY}` },
+        responseType: 'arraybuffer'
+      });
 
-          const resumenAdmin = `📋 *OFERTA REGISTRADA EN BORRADOR*\n\n` +
-            `• *Destino:* ${extraido?.destino || 'No detectado'}\n` +
-            `• *Fecha Salida:* ${extraido?.fecha_salida || 'No detectada'}\n` +
-            `• *Precio:* ${extraido?.precio || 'A consultar'}\n` +
-            `• *Cupos:* ${extraido?.cupos || 'No especificado'}\n\n` +
-            `La oferta se guardó en *ofertas_borrador* en Supabase lista para revisar.`;
+      imageBase64 = Buffer.from(mediaResponse.data).toString('base64');
+      mimeType = mediaResponse.headers['content-type'] || 'image/jpeg';
+      log.success('MEDIA_DOWNLOAD_OK', 'Imagen descargada y convertida a Base64 exitosamente en Node.js.');
+    } catch (mErr) {
+      log.error('MEDIA_DOWNLOAD_ERR', 'Error descargando la imagen en Node.js:', mErr.message);
+    }
+  }
 
-          await sendZernioMessage(conversationId || fromNumber, resumenAdmin);
-        }
+  // Enviar a Render el texto y la imagen lista en Base64
+  log.info('AI_AGENT', 'Enviando payload con Base64 a Render (/agent/extract-flyer)...');
+  const extractionResponse = await pythonClient.post('/agent/extract-flyer', {
+    text_content: textBody,
+    image_base64: imageBase64,
+    mime_type: mimeType
+  });
+
+  const extraido = extractionResponse.data?.datos_extraidos || extractionResponse.data;
+
+  const resumenAdmin = `📋 *OFERTA REGISTRADA EN BORRADOR*\n\n` +
+    `• *Destino:* ${extraido?.destino || 'No detectado'}\n` +
+    `• *Fecha Salida:* ${extraido?.fecha_salida || 'No detectada'}\n` +
+    `• *Precio:* ${extraido?.precio || 'A consultar'}\n` +
+    `• *Cupos:* ${extraido?.cupos || 'No especificado'}\n\n` +
+    `La oferta se guardó en *ofertas_borrador* en Supabase lista para revisar.`;
+
+  await sendZernioMessage(conversationId || fromNumber, resumenAdmin);
+}
       } 
       // ==================================================================
       // B. FLUJO CLIENTE (Consultas al Catálogo Publicado)
