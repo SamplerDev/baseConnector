@@ -371,46 +371,70 @@ app.post('/webhook', verifyZernioSignature, async (req, res) => {
         else {
   log.info('ADMIN_FLYER', `Nueva promo/flyer recibida de Admin (${fromNumber})...`);
 
-  // Avisar al Admin por WhatsApp
-  await sendZernioMessage(conversationId || fromNumber, "⏳ *Procesando flyer/promo con IA...* Dame unos segundos.");
+  await sendZernioMessage(conversationId || fromNumber, "⏳ *Analizando afiche con IA (Buscando ofertas)...*");
 
   let imageBase64 = null;
   let mimeType = 'image/jpeg';
 
-  // Si hay imagen, Node.js la descarga directamente de Zernio
   if (mediaUrl) {
     try {
-      log.info('MEDIA_DOWNLOAD', `Descargando multimedia en Node.js desde Zernio...`);
       const mediaResponse = await axios.get(mediaUrl, {
         headers: { 'Authorization': `Bearer ${ZERNIO_API_KEY}` },
         responseType: 'arraybuffer'
       });
-
       imageBase64 = Buffer.from(mediaResponse.data).toString('base64');
       mimeType = mediaResponse.headers['content-type'] || 'image/jpeg';
-      log.success('MEDIA_DOWNLOAD_OK', 'Imagen descargada y convertida a Base64 exitosamente en Node.js.');
     } catch (mErr) {
-      log.error('MEDIA_DOWNLOAD_ERR', 'Error descargando la imagen en Node.js:', mErr.message);
+      log.error('MEDIA_DOWNLOAD_ERR', 'Error descargando la imagen:', mErr.message);
     }
   }
 
-  // Enviar a Render el texto y la imagen lista en Base64
-  log.info('AI_AGENT', 'Enviando payload con Base64 a Render (/agent/extract-flyer)...');
+  // Llamada a Python
   const extractionResponse = await pythonClient.post('/agent/extract-flyer', {
     text_content: textBody,
     image_base64: imageBase64,
     mime_type: mimeType
   });
 
-  const extraido = extractionResponse.data?.datos_extraidos || extractionResponse.data;
+  const extraido = extractionResponse.data?.datos_extraidos;
+  const ofertasEncontradas = extraido?.ofertas || [];
 
-  const resumenAdmin = `📋 *OFERTA REGISTRADA EN BORRADOR*\n\n` +
-    `• *Destino:* ${extraido?.destino || 'No detectado'}\n` +
-    `• *Fecha Salida:* ${extraido?.fecha_salida || 'No detectada'}\n` +
-    `• *Precio:* ${extraido?.precio || 'A consultar'}\n` +
-    `• *Cupos:* ${extraido?.cupos || 'No especificado'}\n\n` +
-    `La oferta se guardó en *ofertas_borrador* en Supabase lista para revisar.`;
+  if (ofertasEncontradas.length === 0) {
+    await sendZernioMessage(conversationId || fromNumber, "⚠️ No se detectaron ofertas de viaje claras en la imagen o texto enviado.");
+    return;
+  }
 
+  log.info('FLYER_EXTRACTED', `Total de ofertas detectadas por Gemini: ${ofertasEncontradas.length}`);
+
+  let resumenAdmin = `📋 *SE DETECTARON ${ofertasEncontradas.length} OFERTA(S) EN BORRADOR*\n\n`;
+
+  // Iterar guardar e informar cada oferta hallada
+  for (let i = 0; i < ofertasEncontradas.length; i++) {
+    const item = ofertasEncontradas[i];
+
+    // 1. Guardar cada oferta individualmente en Supabase 'ofertas_borrador'
+    const { error: dbErr } = await supabase.from('ofertas_borrador').insert([{
+      destino: item.destino || 'Sin Destino',
+      fecha_salida: item.fecha_salida || 'A confirmar',
+      descripcion: item.descripcion || '',
+      contacto: item.contacto || null,
+      cupos: item.cupos || 1,
+      estado: 'PENDIENTE'
+    }]);
+
+    if (dbErr) log.error('SUPABASE_BORRADOR_ERR', `Error guardando borrador ${i+1}:`, dbErr);
+
+    // 2. Construir bloque de texto para WhatsApp
+    resumenAdmin += `*Oferta #${i + 1}:*\n` +
+      `• *Destino:* ${item.destino || 'No especificado'}\n` +
+      `• *Fecha:* ${item.fecha_salida || 'No especificada'}\n` +
+      `• *Detalle:* ${item.descripcion || 'Sin detalle'}\n` +
+      `• *Cupos:* ${item.cupos || 'A consultar'}\n\n`;
+  }
+
+  resumenAdmin += `✅ Todas fueron guardadas en *ofertas_borrador* para revisión.`;
+
+  // Enviar confirmación al Admin por WhatsApp
   await sendZernioMessage(conversationId || fromNumber, resumenAdmin);
 }
       } 
