@@ -2,7 +2,10 @@ const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 const crypto = require('crypto');
-require('dotenv').config();
+const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '.env') });
+
+console.log("🔑 Zernio API Key:", process.env.ZERNIO_API_KEY ? "✅ Configurada" : "❌ No encontrada");
 
 const supabase = require('./db');
 
@@ -26,6 +29,8 @@ const ADMIN_SECRET_KEY = process.env.ADMIN_SECRET_KEY;
 const ZERNIO_API_KEY = process.env.ZERNIO_API_KEY;
 const ZERNIO_ACCOUNT_ID = process.env.ZERNIO_ACCOUNT_ID;
 const ZERNIO_WEBHOOK_SECRET = process.env.ZERNIO_WEBHOOK_SECRET;
+
+console.log(`🔑 Zernio API Key: ${ZERNIO_API_KEY ? '✅ Configurada' : '❌ Faltante'}`);
 
 // Cliente de Axios para llamar al Microservicio de Python en Render
 const pythonClient = axios.create({
