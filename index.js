@@ -375,9 +375,10 @@ app.post('/webhook', verifyZernioSignature, async (req, res) => {
           await sendZernioMessage(conversationId || fromNumber, "⏳ *Procesando flyer/promo con IA...* Dame unos segundos.");
 
           // Llamada al agente multimodal en Render (Python + Gemini 2.5 Flash)
-          const extractionResponse = await pythonClient.post('/agent/extract-flyer', {
+         const extractionResponse = await pythonClient.post('/agent/extract-flyer', {
             text_content: textBody,
-            image_url: mediaUrl
+            image_url: mediaUrl,
+            zernio_api_key: ZERNIO_API_KEY 
           });
 
           const extraido = extractionResponse.data?.datos_extraidos || extractionResponse.data;
