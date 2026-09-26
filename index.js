@@ -676,27 +676,34 @@ app.post('/api/webhooks/flyer-completed', async (req, res) => {
 
     // Iterar, guardar e informar cada oferta hallada
     for (let i = 0; i < ofertasEncontradas.length; i++) {
-      const item = ofertasEncontradas[i];
+  const item = ofertasEncontradas[i];
 
-      // 1. Guardar cada oferta individualmente en Supabase 'ofertas_borrador'
-      const { error: dbErr } = await supabase.from('ofertas_borrador').insert([{
-        destino: item.destino || 'Sin Destino',
-        fecha_salida: item.fecha_salida || 'A confirmar',
-        descripcion: item.descripcion || '',
-        contacto: item.contacto || null,
-        cupos: item.cupos || 1,
-        estado: 'PENDIENTE'
-      }]);
+  // 1. Inserción limpia en Supabase
+  const { error: dbErr } = await supabase.from('ofertas_borrador').insert([{
+    destino: item.destino || 'Sin Destino',
+    fecha_salida: item.fecha_salida || 'A confirmar',
+    duracion: item.duracion || null,
+    hotel: item.hotel || null,
+    regimen_comida: item.regimen_comida || null,
+    inclusiones: item.inclusiones || null,
+    precio_promo: item.precio_promo || null,
+    promocion: item.promocion || null,
+    contacto: item.contacto || null,
+    cupos: item.cupos || 1,
+    estado: 'PENDIENTE'
+  }]);
 
-      if (dbErr) log.error('SUPABASE_BORRADOR_ERR', `Error guardando borrador ${i + 1}:`, dbErr);
+  if (dbErr) log.error('SUPABASE_BORRADOR_ERR', `Error guardando borrador ${i + 1}:`, dbErr);
 
-      // 2. Construir bloque de texto para WhatsApp
-      resumenAdmin += `*Oferta #${i + 1}:*\n` +
-        `• *Destino:* ${item.destino || 'No especificado'}\n` +
-        `• *Fecha:* ${item.fecha_salida || 'No especificada'}\n` +
-        `• *Detalle:* ${item.descripcion || 'Sin detalle'}\n` +
-        `• *Cupos:* ${item.cupos || 'A consultar'}\n\n`;
-    }
+  // 2. Construcción clara del mensaje para WhatsApp
+  resumenAdmin += `*Oferta #${i + 1}:*\n` +
+    `• *Destino:* ${item.destino || 'N/A'}\n` +
+    `• *Fecha:* ${item.fecha_salida || 'A confirmar'}\n` +
+    `• *Hotel:* ${item.hotel || 'No especificado'}\n` +
+    `• *Régimen:* ${item.regimen_comida || 'Sin especificar'}\n` +
+    `• *Precio:* ${item.precio_promo ? '$' + item.precio_promo : 'A consultar'}\n` +
+    `• *Promo:* ${item.promocion || 'Ninguna'}\n\n`;
+}
 
     resumenAdmin += `✅ Todas fueron guardadas en *ofertas_borrador* para revisión.`;
 
