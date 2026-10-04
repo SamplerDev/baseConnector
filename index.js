@@ -60,6 +60,8 @@ if (!supabase) {
 
 const app = express();
 
+app.set('trust proxy', 1);
+
 // Protecciones de seguridad HTTP y Rate Limit
 app.use(helmet());
 app.use(cors());
