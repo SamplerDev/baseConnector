@@ -60,6 +60,15 @@ if (!supabase) {
 
 const app = express();
 
+setInterval(async () => {
+  try {
+    await pythonClient.get('/health');
+    log.info('KEEP_ALIVE', 'Ping de mantenimiento enviado a Render');
+  } catch (err) {
+    log.warn('KEEP_ALIVE_ERR', 'No se pudo contactar Render en el ping de mantenimiento');
+  }
+}, 10 * 60 * 1000); // 10 minutos
+
 app.set('trust proxy', 1);
 
 // Protecciones de seguridad HTTP y Rate Limit
