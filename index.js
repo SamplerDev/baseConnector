@@ -3,6 +3,8 @@ const cors = require('cors');
 const axios = require('axios');
 const crypto = require('crypto');
 const path = require('path');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
 
 // Carga de variables de entorno con trazabilidad
 const envPath = path.join(__dirname, '.env');
@@ -27,7 +29,6 @@ const log = {
 };
 
 log.info('STARTUP', 'Iniciando servidor Node.js y verificando variables de entorno...');
-log.info('STARTUP', 'Ruta del archivo .env:', envPath);
 
 const PORT = process.env.PORT || 3000;
 const ADMIN_PHONE = process.env.ADMIN_PHONE_NUMBER;
@@ -43,13 +44,13 @@ log.info('ENV_CHECK', 'Estado de variables cargadas:', {
   PORT,
   ADMIN_PHONE: ADMIN_PHONE ? '✅ Configurado' : '❌ Faltante',
   PYTHON_AI_URL,
-  INTERNAL_API_KEY: INTERNAL_API_KEY ? '✅ Configurada'  : '❌ Faltante',
+  INTERNAL_API_KEY: INTERNAL_API_KEY ? '✅ Configurada' : '❌ Faltante',
   ADMIN_SECRET_KEY: ADMIN_SECRET_KEY ? '✅ Configurada' : '❌ Faltante',
   ZERNIO_API_KEY: ZERNIO_API_KEY ? '✅ Configurada' : '❌ Faltante',
   ZERNIO_ACCOUNT_ID: ZERNIO_ACCOUNT_ID ? '✅ Configurado' : '❌ Faltante',
   ZERNIO_WEBHOOK_SECRET: ZERNIO_WEBHOOK_SECRET ? '✅ Configurado' : '⚠️ Omitido / No configurado'
 });
-console.log(INTERNAL_API_KEY);
+
 const supabase = require('./db');
 if (!supabase) {
   log.error('SUPABASE', 'Error crítico: No se pudo instanciar el cliente de Supabase.');
@@ -58,16 +59,27 @@ if (!supabase) {
 }
 
 const app = express();
+
+// Protecciones de seguridad HTTP y Rate Limit
+app.use(helmet());
 app.use(cors());
+
+const apiLimiter = rateLimit({
+  windowMs: 1 * 60 * 1000, // 1 minuto
+  max: 100, // Máximo 100 peticiones por minuto por IP
+  message: { error: 'Demasiadas peticiones desde esta IP' }
+});
+app.use(apiLimiter);
 
 // Guardar buffer crudo para la verificación HMAC de Zernio
 app.use(express.json({
+  limit: '15mb',
   verify: (req, res, buf) => {
     req.rawBody = buf;
   }
 }));
 
-// Middleware Global de Monitorización de Peticiones HTTP Entrantes
+// Middleware Global de Monitorización
 app.use((req, res, next) => {
   const start = Date.now();
   log.info('HTTP_IN', `--> ${req.method} ${req.url} [IP: ${req.ip}]`);
@@ -84,6 +96,7 @@ app.use((req, res, next) => {
 // ==================================================================
 const pythonClient = axios.create({
   baseURL: PYTHON_AI_URL,
+  timeout: 30000, // Timeout seguro de 30s
   headers: {
     'X-API-Key': INTERNAL_API_KEY,
     'Content-Type': 'application/json'
@@ -113,22 +126,19 @@ pythonClient.interceptors.response.use((response) => {
 // FUNCIÓN AUXILIAR: Enviar Mensajes a través de Zernio API
 // ==================================================================
 async function sendZernioMessage(target, text) {
-  // Verificar si target es un conversationId (hexadecimal de 24 caracteres) o un teléfono
   const isConversationId = typeof target === 'string' && target.length === 24 && !target.startsWith('+');
 
   let endpoint = '';
   let payload = {};
 
   if (isConversationId) {
-    // A. Envío directo dentro de una conversación activa
     endpoint = `https://zernio.com/api/v1/inbox/conversations/${target}/messages`;
     payload = {
       accountId: ZERNIO_ACCOUNT_ID,
       message: text
     };
   } else {
-    // B. Envío por número de teléfono (por ejemplo: ADMIN_PHONE o mensaje manual)
-    const participantId = String(target).replace(/\D/g, ''); // Deja solo dígitos
+    const participantId = String(target).replace(/\D/g, '');
     endpoint = `https://zernio.com/api/v1/inbox/conversations`;
     payload = {
       accountId: ZERNIO_ACCOUNT_ID,
@@ -148,7 +158,8 @@ async function sendZernioMessage(target, text) {
         headers: {
           'Authorization': `Bearer ${ZERNIO_API_KEY}`,
           'Content-Type': 'application/json'
-        }
+        },
+        timeout: 15000
       }
     );
     const duration = Date.now() - startTime;
@@ -158,11 +169,12 @@ async function sendZernioMessage(target, text) {
     log.error('ZERNIO_SEND_ERR', `Falla enviando a [${target}]`, err.response?.data || err.message);
   }
 }
+
 // ==================================================================
 // MIDDLEWARES DE SEGURIDAD
 // ==================================================================
 
-// 1. Verificación de firma del Webhook de Zernio (HMAC-SHA256)
+// 1. Verificación HMAC segura contra timing attacks
 function verifyZernioSignature(req, res, next) {
   log.info('AUTH_ZERNIO', 'Evaluando firma HMAC del Webhook...');
   
@@ -172,7 +184,6 @@ function verifyZernioSignature(req, res, next) {
   }
 
   const signature = req.headers['x-zernio-signature'] || req.headers['x-late-signature'];
-  log.info('AUTH_ZERNIO', 'Encabezado de firma recibido:', signature);
 
   if (!signature) {
     log.error('AUTH_ZERNIO', 'Rechazado: Encabezado de firma ausente.');
@@ -184,9 +195,11 @@ function verifyZernioSignature(req, res, next) {
     .update(req.rawBody || '')
     .digest('hex');
 
-  log.info('AUTH_ZERNIO', `Hash calculado: ${expectedHash} | Recibido: ${signature}`);
+  // Comparación criptográfica segura en tiempo constante
+  const sigBuffer = Buffer.from(signature);
+  const expBuffer = Buffer.from(expectedHash);
 
-  if (signature !== expectedHash) {
+  if (sigBuffer.length !== expBuffer.length || !crypto.timingSafeEqual(sigBuffer, expBuffer)) {
     log.error('AUTH_ZERNIO', 'Rechazado: La firma HMAC no coincide con el secreto local.');
     return res.status(403).json({ error: 'Firma de Zernio inválida' });
   }
@@ -210,11 +223,59 @@ function requireAdminAuth(req, res, next) {
 }
 
 // ==================================================================
+// LÓGICA DE NEGOCIO: Procesar Respuesta del Admin
+// ==================================================================
+async function procesarRespuestaAdmin(adminPhone, adminMessage) {
+  if (ADMIN_PHONE && String(adminPhone).replace(/\D/g, '') !== String(ADMIN_PHONE).replace(/\D/g, '')) {
+    log.warn('ADMIN_REPLY_DENIED', `Teléfono no autorizado intentó responder ticket: ${adminPhone}`);
+    throw new Error('Número no autorizado');
+  }
+
+  const match = adminMessage.match(/#(\d+)/);
+  if (!match) {
+    log.warn('ADMIN_REPLY_INVALID', 'No se encontró el ID del ticket (#ID) en el mensaje.');
+    throw new Error('ID de ticket no encontrado en el mensaje (#ID)');
+  }
+
+  const ticket_id = match[1];
+  log.info('ADMIN_REPLY_MATCH', `Procesando Ticket ID: #${ticket_id}`);
+
+  log.info('AI_AGENT', 'Evaluando decisión del Admin con Render (/agent/confirm)...');
+  const aiResponse = await pythonClient.post('/agent/confirm', {
+    admin_message: adminMessage
+  });
+
+  const accion = aiResponse.data.accion;
+  const nuevoEstado = (accion === 'APROBAR') ? 'CONFIRMADO' : 'RECHAZAR';
+  log.info('ADMIN_REPLY_DECISION', `Decisión parseada: ${accion} -> Nuevo Estado: ${nuevoEstado}`);
+
+  const { data: ticket, error } = await supabase
+    .from('tickets_disponibilidad')
+    .update({ estado: nuevoEstado })
+    .eq('id', ticket_id)
+    .select('*, ofertas_publicadas(destino, fecha_salida, descripcion)')
+    .single();
+
+  if (error || !ticket) {
+    throw new Error(`Error actualizando ticket #${ticket_id} en Supabase`);
+  }
+
+  const destinoNombre = ticket.ofertas_publicadas?.destino || 'tu viaje';
+  let mensajeCliente = nuevoEstado === 'CONFIRMADO'
+    ? `🎉 ¡Buenas noticias! Confirmamos disponibilidad para tu viaje a *${destinoNombre}*. ¿Deseas proceder con la reserva?`
+    : `Lamentablemente no contamos con lugares disponibles para *${destinoNombre}* en este momento.`;
+
+  await sendZernioMessage(ticket.client_phone, mensajeCliente);
+  log.success('ADMIN_REPLY_OK', `Flujo de doble confirmación completado para ticket #${ticket_id}`);
+
+  return { ticket_id, nuevoEstado };
+}
+
+// ==================================================================
 // FUNCIONES AUXILIARES: Deduplicación en Supabase
 // ==================================================================
 async function isMessageProcessed(eventId) {
   if (!supabase || !eventId) return false;
-  log.info('DEDUP_CHECK', `Verificando evento en Supabase: ${eventId}`);
   
   const { data, error } = await supabase
     .from('mensajes_procesados')
@@ -227,14 +288,11 @@ async function isMessageProcessed(eventId) {
     return false;
   }
 
-  const processed = !!data;
-  log.info('DEDUP_RESULT', `¿El evento ${eventId} ya fue procesado?: ${processed}`);
-  return processed;
+  return !!data;
 }
 
 async function markMessageAsProcessed(eventId) {
   if (!supabase || !eventId) return;
-  log.info('DEDUP_MARK', `Registrando evento como procesado en Supabase: ${eventId}`);
   
   const { error } = await supabase
     .from('mensajes_procesados')
@@ -254,38 +312,30 @@ app.get('/health', async (req, res) => {
   log.info('HEALTH', 'Ejecutando Healthcheck...');
   try {
     if (!supabase) {
-      log.error('HEALTH', 'Falla en Healthcheck: Supabase no inicializado.');
       return res.status(500).json({ status: 'Error', message: 'Variables de Supabase faltantes' });
     }
 
-    log.info('HEALTH', 'Pingo a Supabase (ofertas_publicadas)...');
     const { data, error } = await supabase
       .from('ofertas_publicadas')
       .select('count', { count: 'exact' });
 
     if (error) throw error;
-    log.success('HEALTH', `Supabase respondiendo OK. Total ofertas en BD:`, data);
 
     let pythonStatus = 'Desconocido';
     try {
-      log.info('HEALTH', 'Pingo a servicio Python en Render...');
       const pyHealth = await pythonClient.get('/health');
       pythonStatus = pyHealth.data.status;
     } catch (e) {
       pythonStatus = `Error conectando con Render: ${e.message}`;
-      log.warn('HEALTH', pythonStatus);
     }
 
-    const healthResponse = {
+    res.status(200).json({
       status: 'OK',
       provider: 'Zernio API',
       database: 'Supabase Conectado Correctamente',
       total_ofertas: data,
       python_service: pythonStatus
-    };
-
-    log.success('HEALTH', 'Healthcheck completado con éxito:', healthResponse);
-    res.status(200).json(healthResponse);
+    });
   } catch (err) {
     log.error('HEALTH_ERR', 'Error durante el Healthcheck', err);
     res.status(500).json({ status: 'Error', details: err.message });
@@ -293,31 +343,24 @@ app.get('/health', async (req, res) => {
 });
 
 // ==================================================================
-// 2. WEBHOOK ZERNIO: Recepción de Eventos
-// ==================================================================
-// ==================================================================
-// 2. WEBHOOK ZERNIO: Recepción de Eventos y Mensajes de WhatsApp
+// 2. WEBHOOK ZERNIO: Recepción de Eventos y Mensajes
 // ==================================================================
 app.post('/webhook', verifyZernioSignature, async (req, res) => {
   log.info('WEBHOOK_IN', 'Payload completo recibido en /webhook:', req.body);
 
   // Respuesta inmediata 200 OK a Zernio
   res.status(200).send({ status: 'RECEIVED' });
-  log.info('WEBHOOK_ACK', 'Respuesta 200 OK enviada inmediatamente a Zernio.');
 
   setImmediate(async () => {
     try {
       const payload = req.body;
       const eventId = payload.id || req.headers['x-zernio-event-id'] || req.headers['x-late-event-id'];
 
-      log.info('WEBHOOK_PROC', `Procesando evento asíncrono [ID: ${eventId}]`);
-
       if (payload.event && payload.event !== 'message.received' && payload.event !== 'dm.received') {
-        log.warn('WEBHOOK_SKIP', `Evento ignorado por no ser de mensaje: ${payload.event}`);
         return;
       }
 
-      // Deduplicación en Supabase
+      // Deduplicación
       if (await isMessageProcessed(eventId)) {
         log.warn('WEBHOOK_DEDUP', `⚠️ Evento duplicado omitido [ID: ${eventId}]`);
         return;
@@ -330,45 +373,26 @@ app.post('/webhook', verifyZernioSignature, async (req, res) => {
       const textBody = messageData.text || messageData.message || messageData.body || messageData.caption || '';
       const conversationId = messageData.conversationId || payload.conversation?.id;
 
-      // Extraer URL de la imagen si fue enviada
       let mediaUrl = null;
       if (messageData.attachments && messageData.attachments.length > 0) {
         mediaUrl = messageData.attachments[0].url || messageData.attachments[0].payload?.url;
       }
 
-      log.info('WEBHOOK_PARSED', 'Datos de mensaje extraídos:', {
-        fromNumber,
-        textBody,
-        mediaUrl,
-        hasAttachments: Boolean(mediaUrl)
-      });
-
       if (!fromNumber || (!textBody && !mediaUrl)) {
-        log.warn('WEBHOOK_ABORT', 'No se detectó remitente ni contenido multimedia/texto. Abortando.');
+        log.warn('WEBHOOK_ABORT', 'No se detectó remitente ni contenido.');
         return;
       }
 
-      // Comprobar si el remitente es Administrador
       const cleanFrom = String(fromNumber).replace(/\D/g, '');
       const cleanAdmin = String(ADMIN_PHONE).replace(/\D/g, '');
       const isAdmin = cleanFrom === cleanAdmin;
 
-      log.info('AUTH_CHECK', `¿El remitente ${fromNumber} es Administrador?: ${isAdmin}`);
-
-      // ==================================================================
-      // A. FLUJO ADMINISTRADOR
-      // ==================================================================
+      // FLUJO ADMINISTRADOR
       if (isAdmin) {
-        // A.1. Confirmación de Ticket con #ID (Doble confirmación)
         if (textBody && textBody.includes('#')) {
-          log.info('ADMIN_FLOW', `Confirmación de ticket recibida de Admin (${fromNumber}): ${textBody}`);
-          await axios.post(`http://localhost:${PORT}/api/webhook/admin-respuesta`, {
-            admin_phone: fromNumber,
-            admin_message: textBody
-          });
-        } 
-        // A.2. Extracción de Promo/Flyer (Texto, Imagen o Ambos)
-        else {
+          log.info('ADMIN_FLOW', `Procesando confirmación de ticket desde función interna...`);
+          await procesarRespuestaAdmin(fromNumber, textBody);
+        } else {
           log.info('ADMIN_FLYER', `Nueva promo/flyer recibida de Admin (${fromNumber})...`);
 
           const targetId = conversationId || fromNumber;
@@ -381,7 +405,8 @@ app.post('/webhook', verifyZernioSignature, async (req, res) => {
             try {
               const mediaResponse = await axios.get(mediaUrl, {
                 headers: { 'Authorization': `Bearer ${ZERNIO_API_KEY}` },
-                responseType: 'arraybuffer'
+                responseType: 'arraybuffer',
+                timeout: 15000
               });
               imageBase64 = Buffer.from(mediaResponse.data).toString('base64');
               mimeType = mediaResponse.headers['content-type'] || 'image/jpeg';
@@ -390,22 +415,17 @@ app.post('/webhook', verifyZernioSignature, async (req, res) => {
             }
           }
 
-          // Disparar tarea en segundo plano en Python (No se espera el resultado aquí)
+          // Disparar tarea en segundo plano en Python
           await pythonClient.post('/agent/extract-flyer', {
-            phone_number: targetId, // <-- Requerido por Python
+            phone_number: targetId,
             text_content: textBody,
             image_base64: imageBase64,
             mime_type: mimeType
           });
-
-          log.info('ADMIN_FLYER', `Tarea enviada con éxito a Python en segundo plano para ${targetId}`);
         }
       } 
-      // ==================================================================
-      // B. FLUJO CLIENTE (Consultas al Catálogo Publicado)
-      // ==================================================================
+      // FLUJO CLIENTE
       else {
-        // Consulta de estado de la conversación (Human Takeover)
         const { data: conv } = await supabase
           .from('conversaciones')
           .select('bot_activo')
@@ -414,7 +434,6 @@ app.post('/webhook', verifyZernioSignature, async (req, res) => {
 
         const botActivo = conv ? conv.bot_activo : true;
 
-        // Registrar mensaje en el historial del cliente
         await supabase.from('chat_sesiones').insert([{
           phone_number: fromNumber,
           role: 'user',
@@ -422,14 +441,12 @@ app.post('/webhook', verifyZernioSignature, async (req, res) => {
         }]);
 
         if (botActivo) {
-          log.info('CLIENT_FLOW', `Obteniendo catálogo publicado desde Supabase...`);
           const { data: catalogo } = await supabase
             .from('ofertas_publicadas')
             .select('id, destino, fecha_salida, descripcion, contacto, cupos')
             .eq('activo', true)
             .gt('cupos', 0);
 
-          log.info('AI_AGENT', 'Enviando consulta del cliente a Render (/agent/chat)...');
           const aiResponse = await pythonClient.post('/agent/chat', {
             user_message: textBody,
             travel_catalog: catalogo || [],
@@ -438,30 +455,25 @@ app.post('/webhook', verifyZernioSignature, async (req, res) => {
 
           const respuestaIA = aiResponse.data.response;
 
-          // Guardar respuesta en el historial
           await supabase.from('chat_sesiones').insert([{
             phone_number: fromNumber,
             role: 'assistant',
             content: respuestaIA
           }]);
 
-          // Responder al cliente
           await sendZernioMessage(conversationId || fromNumber, respuestaIA);
-        } else {
-          log.warn('BOT_PAUSED', `Bot pausado para ${fromNumber}. Mensaje disponible en Dashboard.`);
         }
       }
     } catch (err) {
-      log.error('WEBHOOK_PROC_ERR', 'Error grave durante el procesamiento del Webhook', err);
+      log.error('WEBHOOK_PROC_ERR', 'Error durante el procesamiento del Webhook', err);
     }
   });
 });
 
 // ==================================================================
-// 3. RUTAS PÚBLICAS
+// 3. RUTAS PÚBLICAS Y ADMINISTRATIVAS
 // ==================================================================
 app.get('/api/catalogo-activo', async (req, res) => {
-  log.info('API_PUBLIC', 'Solicitud recibida en /api/catalogo-activo');
   try {
     const { data, error } = await supabase
       .from('ofertas_publicadas')
@@ -471,21 +483,15 @@ app.get('/api/catalogo-activo', async (req, res) => {
       .order('fecha_salida', { ascending: true });
 
     if (error) throw error;
-    log.success('API_PUBLIC', `Catálogo entregado. Total ítems: ${data.length}`);
     res.status(200).json({ ok: true, catalogo: data });
   } catch (err) {
-    log.error('API_PUBLIC_ERR', 'Error en /api/catalogo-activo', err);
     res.status(500).json({ ok: false, error: err.message });
   }
 });
 
-// ==================================================================
-// 4. RUTAS ADMINISTRATIVAS DEL DASHBOARD (Protegidas)
-// ==================================================================
 app.use('/api/admin', requireAdminAuth);
 
 app.get('/api/admin/conversaciones', async (req, res) => {
-  log.info('ADMIN_ROUTE', 'GET /api/admin/conversaciones');
   try {
     const { data, error } = await supabase
       .from('conversaciones')
@@ -493,17 +499,14 @@ app.get('/api/admin/conversaciones', async (req, res) => {
       .order('ultimo_mensaje', { ascending: false });
 
     if (error) throw error;
-    log.success('ADMIN_ROUTE', `Conversaciones obtenidas: ${data.length}`);
     res.status(200).json({ ok: true, conversaciones: data });
   } catch (err) {
-    log.error('ADMIN_ROUTE_ERR', 'Error obteniendo conversaciones', err);
     res.status(500).json({ ok: false, error: err.message });
   }
 });
 
 app.patch('/api/admin/toggle-bot', async (req, res) => {
   const { phone_number, bot_activo } = req.body;
-  log.info('ADMIN_ROUTE', `PATCH /api/admin/toggle-bot - Tel: ${phone_number}, Nuevo Estado: ${bot_activo}`);
   try {
     const { data, error } = await supabase
       .from('conversaciones')
@@ -512,137 +515,49 @@ app.patch('/api/admin/toggle-bot', async (req, res) => {
       .select();
 
     if (error) throw error;
-    log.success('ADMIN_ROUTE', `Estado del bot actualizado para ${phone_number}`, data);
     res.status(200).json({ ok: true, estado: data });
   } catch (err) {
-    log.error('ADMIN_ROUTE_ERR', 'Error en toggle-bot', err);
     res.status(500).json({ ok: false, error: err.message });
   }
 });
 
 app.post('/api/admin/enviar-mensaje-manual', async (req, res) => {
   const { phone_number, mensaje } = req.body;
-  log.info('ADMIN_ROUTE', `POST /api/admin/enviar-mensaje-manual - Tel: ${phone_number}`, { mensaje });
   try {
     await sendZernioMessage(phone_number, mensaje);
 
-    log.info('SUPABASE_INSERT', 'Guardando mensaje manual humano en chat_sesiones...');
     await supabase.from('chat_sesiones').insert([{
       phone_number,
       role: 'human',
       content: mensaje
     }]);
 
-    log.info('SUPABASE_UPDATE', 'Pausando el bot para intervención humana...');
     await supabase.from('conversaciones').update({
       bot_activo: false,
       ultimo_mensaje: new Date()
     }).eq('phone_number', phone_number);
 
-    log.success('ADMIN_ROUTE', `Mensaje manual procesado para ${phone_number}`);
     res.status(200).json({ ok: true, mensaje: 'Mensaje enviado manualmente' });
   } catch (err) {
-    log.error('ADMIN_ROUTE_ERR', 'Error en envío manual', err);
     res.status(500).json({ ok: false, error: err.message });
   }
 });
 
-// ==================================================================
-// 5. DOBLE CONFIRMACIÓN DE TICKETS
-// ==================================================================
-app.post('/api/solicitar-confirmacion-doble', async (req, res) => {
-  const { client_phone, viaje_id, destino } = req.body;
-  log.info('CONFIRM_DOUBLE', 'Solicitud de doble confirmación recibida:', req.body);
-  try {
-    const { data: ticket, error } = await supabase
-      .from('tickets_disponibilidad')
-      .insert([{ client_phone, viaje_id, estado: 'ESPERANDO_ADMIN' }])
-      .select()
-      .single();
-
-    if (error) throw error;
-    log.success('CONFIRM_DOUBLE', `Ticket creado en BD [ID: #${ticket.id}]`);
-
-    const mensajeAdmin = `⚠️ *SOLICITUD DE DOBLE CONFIRMACIÓN*\n\n` +
-      `Ticket ID: #${ticket.id}\n` +
-      `Cliente: ${client_phone}\n` +
-      `Viaje: ${destino} (ID: ${viaje_id})\n\n` +
-      `¿Confirmas disponibilidad en tiempo real?\n` +
-      `Responde *"SI #${ticket.id}"* o *"NO #${ticket.id}"*.`;
-
-    await sendZernioMessage(ADMIN_PHONE, mensajeAdmin);
-
-    res.status(200).json({
-      ok: true,
-      ticket_id: ticket.id,
-      respuesta_cliente: 'Estamos verificando la disponibilidad exacta con la oficina central.'
-    });
-  } catch (err) {
-    log.error('CONFIRM_DOUBLE_ERR', 'Error en solicitar-confirmacion-doble', err);
-    res.status(500).json({ ok: false, error: err.message });
-  }
-});
-
+// Endpoint público para que el cliente o admin invoque respuesta directamente
 app.post('/api/webhook/admin-respuesta', async (req, res) => {
   const { admin_phone, admin_message } = req.body;
-  log.info('ADMIN_REPLY', `Respuesta del Admin recibida (${admin_phone}):`, admin_message);
-
-  if (ADMIN_PHONE && admin_phone !== ADMIN_PHONE) {
-    log.warn('ADMIN_REPLY_DENIED', `Teléfono no autorizado intentó responder ticket: ${admin_phone}`);
-    return res.status(403).json({ ok: false, message: 'Número no autorizado' });
-  }
-
   try {
-    const match = admin_message.match(/#(\d+)/);
-    if (!match) {
-      log.warn('ADMIN_REPLY_INVALID', 'No se encontró el ID del ticket (#ID) en el mensaje.');
-      return res.status(400).json({ ok: false, message: 'ID de ticket no encontrado' });
-    }
-
-    const ticket_id = match[1];
-    log.info('ADMIN_REPLY_MATCH', `Procesando Ticket ID: #${ticket_id}`);
-
-    log.info('AI_AGENT', 'Evaluando decisión del Admin con Render (/agent/confirm)...');
-    const aiResponse = await pythonClient.post('/agent/confirm', {
-      admin_message: admin_message
-    });
-
-    const accion = aiResponse.data.accion;
-    const nuevoEstado = (accion === 'APROBAR') ? 'CONFIRMADO' : 'RECHAZAR';
-    log.info('ADMIN_REPLY_DECISION', `Decisión parseada: ${accion} -> Nuevo Estado: ${nuevoEstado}`);
-
-    const { data: ticket, error } = await supabase
-      .from('tickets_disponibilidad')
-      .update({ estado: nuevoEstado })
-      .eq('id', ticket_id)
-      .select('*, ofertas_publicadas(destino, fecha_salida, descripcion)')
-      .single();
-
-    if (error || !ticket) {
-      throw new Error(`Error actualizando ticket #${ticket_id} en Supabase`);
-    }
-
-    let mensajeCliente = nuevoEstado === 'CONFIRMADO'
-      ? `🎉 ¡Buenas noticias! Confirmamos disponibilidad para tu viaje a *${ticket.ofertas_publicadas.destino}*. ¿Deseas proceder con la reserva?`
-      : `Lamentablemente no contamos con lugares disponibles para *${ticket.ofertas_publicadas.destino}* en este momento.`;
-
-    await sendZernioMessage(ticket.client_phone, mensajeCliente);
-
-    log.success('ADMIN_REPLY_OK', `Flujo de doble confirmación completado para ticket #${ticket_id}`);
-    res.status(200).json({ ok: true, ticket_id, nuevoEstado });
+    const resultado = await procesarRespuestaAdmin(admin_phone, admin_message);
+    res.status(200).json({ ok: true, ...resultado });
   } catch (err) {
-    log.error('ADMIN_REPLY_ERR', 'Error procesando respuesta del Admin', err);
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(400).json({ ok: false, error: err.message });
   }
 });
 
 // ==================================================================
-// CALLBACK DESDE PYTHON: Recepción de ofertas extraídas por Gemini
+// 4. CALLBACK DESDE PYTHON (Resultado de Ofertas)
 // ==================================================================
 app.post('/api/webhooks/flyer-completed', async (req, res) => {
-  log.info('CALLBACK_IN', 'Resultado de afiche recibido desde Python...');
-
-  // Validar autenticación interna
   const authHeader = req.headers.authorization;
   const token = authHeader ? authHeader.split(' ')[1] : req.headers['x-api-key'];
 
@@ -651,13 +566,11 @@ app.post('/api/webhooks/flyer-completed', async (req, res) => {
     return res.status(401).json({ error: 'No autorizado' });
   }
 
-  // Responder 200 OK inmediatamente a Python
   res.status(200).json({ ok: true });
 
   const { phoneNumber, extractedData, error, message } = req.body;
 
   if (error) {
-    log.error('CALLBACK_PROC_ERR', `Python reportó un error: ${message}`);
     await sendZernioMessage(phoneNumber, `❌ Ocurrió un error procesando la imagen: ${message || 'Error en IA'}`);
     return;
   }
@@ -670,44 +583,38 @@ app.post('/api/webhooks/flyer-completed', async (req, res) => {
       return;
     }
 
-    log.info('FLYER_EXTRACTED', `Total de ofertas detectadas por Gemini: ${ofertasEncontradas.length}`);
-
     let resumenAdmin = `📋 *SE DETECTARON ${ofertasEncontradas.length} OFERTA(S) EN BORRADOR*\n\n`;
 
-    // Iterar, guardar e informar cada oferta hallada
     for (let i = 0; i < ofertasEncontradas.length; i++) {
-  const item = ofertasEncontradas[i];
+      const item = ofertasEncontradas[i];
 
-  // 1. Inserción limpia en Supabase
-  const { error: dbErr } = await supabase.from('ofertas_borrador').insert([{
-    destino: item.destino || 'Sin Destino',
-    fecha_salida: item.fecha_salida || 'A confirmar',
-    duracion: item.duracion || null,
-    hotel: item.hotel || null,
-    regimen_comida: item.regimen_comida || null,
-    inclusiones: item.inclusiones || null,
-    precio_promo: item.precio_promo || null,
-    promocion: item.promocion || null,
-    contacto: item.contacto || null,
-    cupos: item.cupos || 1,
-    estado: 'PENDIENTE'
-  }]);
+      const { error: dbErr } = await supabase.from('ofertas_borrador').insert([{
+        destino: item.destino || 'Sin Destino',
+        fecha_salida: item.fecha_salida || 'A confirmar',
+        duracion: item.duracion || null,
+        hotel: item.hotel || null,
+        regimen_comida: item.regimen_comida || null,
+        inclusiones: item.inclusiones || null,
+        precio_promo: item.precio_promo || null,
+        promocion: item.promocion || null,
+        contacto: item.contacto || null,
+        cupos: item.cupos || 1,
+        estado: 'PENDIENTE'
+      }]);
 
-  if (dbErr) log.error('SUPABASE_BORRADOR_ERR', `Error guardando borrador ${i + 1}:`, dbErr);
+      if (dbErr) log.error('SUPABASE_BORRADOR_ERR', `Error guardando borrador ${i + 1}:`, dbErr);
 
-  // 2. Construcción clara del mensaje para WhatsApp
-  resumenAdmin += `*Oferta #${i + 1}:*\n` +
-    `• *Destino:* ${item.destino || 'N/A'}\n` +
-    `• *Fecha:* ${item.fecha_salida || 'A confirmar'}\n` +
-    `• *Hotel:* ${item.hotel || 'No especificado'}\n` +
-    `• *Régimen:* ${item.regimen_comida || 'Sin especificar'}\n` +
-    `• *Precio:* ${item.precio_promo ? '$' + item.precio_promo : 'A consultar'}\n` +
-    `• *Promo:* ${item.promocion || 'Ninguna'}\n\n`;
-}
+      resumenAdmin += `*Oferta #${i + 1}:*\n` +
+        `• *Destino:* ${item.destino || 'N/A'}\n` +
+        `• *Fecha:* ${item.fecha_salida || 'A confirmar'}\n` +
+        `• *Hotel:* ${item.hotel || 'No especificado'}\n` +
+        `• *Régimen:* ${item.regimen_comida || 'Sin especificar'}\n` +
+        `• *Precio:* ${item.precio_promo ? '$' + item.precio_promo : 'A consultar'}\n` +
+        `• *Promo:* ${item.promocion || 'Ninguna'}\n\n`;
+    }
 
     resumenAdmin += `✅ Todas fueron guardadas en *ofertas_borrador* para revisión.`;
 
-    // Enviar confirmación al Admin por WhatsApp
     await sendZernioMessage(phoneNumber, resumenAdmin);
     log.success('CALLBACK_DONE', `Flujo de afiche completado y notificado a ${phoneNumber}`);
 
@@ -716,10 +623,7 @@ app.post('/api/webhooks/flyer-completed', async (req, res) => {
   }
 });
 
-
-// ==================================================================
 // ARRANCAR SERVIDOR
-// ==================================================================
 app.listen(PORT, () => {
-  log.success('SERVER_BOOT', `🚀 Servidor Express activo en puerto ${PORT} (Integrado con Zernio API)`);
+  log.success('SERVER_BOOT', `🚀 Servidor Express activo en puerto ${PORT}`);
 });
