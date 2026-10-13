@@ -34,7 +34,6 @@ const PORT = process.env.PORT || 3000;
 const ADMIN_PHONE = process.env.ADMIN_PHONE_NUMBER;
 const PYTHON_AI_URL = process.env.PYTHON_AI_URL || 'http://localhost:8000';
 const INTERNAL_API_KEY = process.env.INTERNAL_API_KEY;
-const ADMIN_SECRET_KEY = process.env.ADMIN_SECRET_KEY;
 const ZERNIO_API_KEY = process.env.ZERNIO_API_KEY;
 const ZERNIO_ACCOUNT_ID = process.env.ZERNIO_ACCOUNT_ID;
 const ZERNIO_WEBHOOK_SECRET = process.env.ZERNIO_WEBHOOK_SECRET;
@@ -45,7 +44,6 @@ log.info('ENV_CHECK', 'Estado de variables cargadas:', {
   ADMIN_PHONE: ADMIN_PHONE ? '✅ Configurado' : '❌ Faltante',
   PYTHON_AI_URL,
   INTERNAL_API_KEY: INTERNAL_API_KEY ? '✅ Configurada' : '❌ Faltante',
-  ADMIN_SECRET_KEY: ADMIN_SECRET_KEY ? '✅ Configurada' : '❌ Faltante',
   ZERNIO_API_KEY: ZERNIO_API_KEY ? '✅ Configurada' : '❌ Faltante',
   ZERNIO_ACCOUNT_ID: ZERNIO_ACCOUNT_ID ? '✅ Configurado' : '❌ Faltante',
   ZERNIO_WEBHOOK_SECRET: ZERNIO_WEBHOOK_SECRET ? '✅ Configurado' : '⚠️ Omitido / No configurado'
@@ -60,15 +58,7 @@ if (!supabase) {
 
 const app = express();
 
-setInterval(async () => {
-  try {
-    await pythonClient.get('/health');
-    log.info('KEEP_ALIVE', 'Ping de mantenimiento enviado a Render');
-  } catch (err) {
-    log.warn('KEEP_ALIVE_ERR', 'No se pudo contactar Render en el ping de mantenimiento');
-  }
-}, 10 * 60 * 1000); // 10 minutos
-
+// Confiar en el proxy inverso de Hostinger (LiteSpeed)
 app.set('trust proxy', 1);
 
 // Protecciones de seguridad HTTP y Rate Limit
@@ -76,8 +66,8 @@ app.use(helmet());
 app.use(cors());
 
 const apiLimiter = rateLimit({
-  windowMs: 1 * 60 * 1000, // 1 minuto
-  max: 100, // Máximo 100 peticiones por minuto por IP
+  windowMs: 1 * 60 * 1000,
+  max: 100,
   message: { error: 'Demasiadas peticiones desde esta IP' }
 });
 app.use(apiLimiter);
@@ -103,11 +93,11 @@ app.use((req, res, next) => {
 });
 
 // ==================================================================
-// CLIENTE AXIOS PARA PYTHON (RENDER) CON LOGS DE TIEMPO
+// CLIENTE AXIOS PARA PYTHON (RENDER) CON LOGS Y KEEP-ALIVE
 // ==================================================================
 const pythonClient = axios.create({
   baseURL: PYTHON_AI_URL,
-  timeout: 30000, // Timeout seguro de 30s
+  timeout: 60000, // Timeout de 60s para tolerar el cold start de Render
   headers: {
     'X-API-Key': INTERNAL_API_KEY,
     'Content-Type': 'application/json'
@@ -132,6 +122,16 @@ pythonClient.interceptors.response.use((response) => {
   log.error('PYTHON_RES_ERR', `[Render] Error en llamada a Python [${duration}ms]`, err.response?.data || err.message);
   return Promise.reject(err);
 });
+
+// Mantener despierto el microservicio de Render enviando un ping cada 10 minutos
+setInterval(async () => {
+  try {
+    await pythonClient.get('/health');
+    log.info('KEEP_ALIVE', 'Ping de mantenimiento enviado a Render');
+  } catch (err) {
+    log.warn('KEEP_ALIVE_ERR', 'No se pudo contactar Render en el ping de mantenimiento');
+  }
+}, 10 * 60 * 1000);
 
 // ==================================================================
 // FUNCIÓN AUXILIAR: Enviar Mensajes a través de Zernio API
@@ -185,7 +185,7 @@ async function sendZernioMessage(target, text) {
 // MIDDLEWARES DE SEGURIDAD
 // ==================================================================
 
-// 1. Verificación HMAC segura contra timing attacks
+// 1. Verificación HMAC segura contra timing attacks (Webhooks Zernio)
 function verifyZernioSignature(req, res, next) {
   log.info('AUTH_ZERNIO', 'Evaluando firma HMAC del Webhook...');
   
@@ -206,7 +206,6 @@ function verifyZernioSignature(req, res, next) {
     .update(req.rawBody || '')
     .digest('hex');
 
-  // Comparación criptográfica segura en tiempo constante
   const sigBuffer = Buffer.from(signature);
   const expBuffer = Buffer.from(expectedHash);
 
@@ -219,22 +218,44 @@ function verifyZernioSignature(req, res, next) {
   next();
 }
 
-// 2. Seguridad para Endpoints Administrativos
-function requireAdminAuth(req, res, next) {
-  const adminKey = req.headers['x-admin-key'];
-  log.info('AUTH_ADMIN', 'Validando acceso administrativo...');
-
-  if (!ADMIN_SECRET_KEY || adminKey !== ADMIN_SECRET_KEY) {
-    log.warn('AUTH_ADMIN', 'Acceso denegado: X-Admin-Key incorrecta o no enviada.');
-    return res.status(401).json({ ok: false, error: 'No autorizado: X-Admin-Key inválida o ausente' });
+// 2. Middleware para verificar que la petición proviene de un Admin autenticado con 2FA en Supabase
+async function requireSupabaseAuth(req, res, next) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ ok: false, error: 'Token de acceso no proporcionado' });
   }
 
-  log.success('AUTH_ADMIN', 'Autenticación administrativa concedida.');
+  const token = authHeader.split(' ')[1];
+
+  // Validar el token con Supabase
+  const { data: { user }, error } = await supabase.auth.getUser(token);
+
+  if (error || !user) {
+    return res.status(401).json({ ok: false, error: 'Sesión no válida o expirada' });
+  }
+
+  // Verificar el claim 'aal' del JWT para confirmar que se completó el segundo factor (TOTP)
+  try {
+    const payloadBase64 = token.split('.')[1];
+    const decodedJson = Buffer.from(payloadBase64, 'base64').toString('utf8');
+    const jwtPayload = JSON.parse(decodedJson);
+
+    if (jwtPayload.aal !== 'aal2') {
+      return res.status(403).json({ ok: false, error: 'Se requiere verificación de doble factor (2FA)' });
+    }
+  } catch (e) {
+    return res.status(401).json({ ok: false, error: 'Formato de token de autenticación inválido' });
+  }
+
+  req.user = user;
   next();
 }
 
+// Proteger todas las rutas de /api/admin centralizadamente con Supabase 2FA
+app.use('/api/admin', requireSupabaseAuth);
+
 // ==================================================================
-// LÓGICA DE NEGOCIO: Procesar Respuesta del Admin
+// LÓGICA DE NEGOCIO: Procesar Respuesta del Admin (Tickets)
 // ==================================================================
 async function procesarRespuestaAdmin(adminPhone, adminMessage) {
   if (ADMIN_PHONE && String(adminPhone).replace(/\D/g, '') !== String(ADMIN_PHONE).replace(/\D/g, '')) {
@@ -359,7 +380,6 @@ app.get('/health', async (req, res) => {
 app.post('/webhook', verifyZernioSignature, async (req, res) => {
   log.info('WEBHOOK_IN', 'Payload completo recibido en /webhook:', req.body);
 
-  // Respuesta inmediata 200 OK a Zernio
   res.status(200).send({ status: 'RECEIVED' });
 
   setImmediate(async () => {
@@ -371,14 +391,12 @@ app.post('/webhook', verifyZernioSignature, async (req, res) => {
         return;
       }
 
-      // Deduplicación
       if (await isMessageProcessed(eventId)) {
         log.warn('WEBHOOK_DEDUP', `⚠️ Evento duplicado omitido [ID: ${eventId}]`);
         return;
       }
       await markMessageAsProcessed(eventId);
 
-      // Normalización de datos del mensaje
       const messageData = payload.message || payload.data || payload;
       const fromNumber = messageData.sender?.phoneNumber || messageData.from || messageData.sender;
       const textBody = messageData.text || messageData.message || messageData.body || messageData.caption || '';
@@ -426,7 +444,6 @@ app.post('/webhook', verifyZernioSignature, async (req, res) => {
             }
           }
 
-          // Disparar tarea en segundo plano en Python
           await pythonClient.post('/agent/extract-flyer', {
             phone_number: targetId,
             text_content: textBody,
@@ -482,7 +499,7 @@ app.post('/webhook', verifyZernioSignature, async (req, res) => {
 });
 
 // ==================================================================
-// 3. RUTAS PÚBLICAS Y ADMINISTRATIVAS
+// 3. RUTAS PÚBLICAS
 // ==================================================================
 app.get('/api/catalogo-activo', async (req, res) => {
   try {
@@ -500,8 +517,19 @@ app.get('/api/catalogo-activo', async (req, res) => {
   }
 });
 
-app.use('/api/admin', requireAdminAuth);
+app.post('/api/webhook/admin-respuesta', async (req, res) => {
+  const { admin_phone, admin_message } = req.body;
+  try {
+    const resultado = await procesarRespuestaAdmin(admin_phone, admin_message);
+    res.status(200).json({ ok: true, ...resultado });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: err.message });
+  }
+});
 
+// ==================================================================
+// 4. RUTAS ADMINISTRATIVAS PROTEGIDAS (Supabase 2FA Token)
+// ==================================================================
 app.get('/api/admin/conversaciones', async (req, res) => {
   try {
     const { data, error } = await supabase
@@ -554,19 +582,74 @@ app.post('/api/admin/enviar-mensaje-manual', async (req, res) => {
   }
 });
 
-// Endpoint público para que el cliente o admin invoque respuesta directamente
-app.post('/api/webhook/admin-respuesta', async (req, res) => {
-  const { admin_phone, admin_message } = req.body;
+app.get('/api/admin/borradores', async (req, res) => {
   try {
-    const resultado = await procesarRespuestaAdmin(admin_phone, admin_message);
-    res.status(200).json({ ok: true, ...resultado });
+    const { data, error } = await supabase
+      .from('ofertas_borrador')
+      .select('*')
+      .eq('estado', 'PENDIENTE')
+      .order('created_at', { ascending: false });
+
+    if (error) throw error;
+    res.status(200).json({ ok: true, borradores: data });
   } catch (err) {
-    res.status(400).json({ ok: false, error: err.message });
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.post('/api/admin/aprobar-borrador/:id', async (req, res) => {
+  const { id } = req.params;
+  const datosEditados = req.body;
+
+  try {
+    const { data: ofertaPublicada, error: pubErr } = await supabase
+      .from('ofertas_publicadas')
+      .insert([{
+        destino: datosEditados.destino,
+        fecha_salida: datosEditados.fecha_salida,
+        duracion: datosEditados.duracion,
+        hotel: datosEditados.hotel,
+        regimen_comida: datosEditados.regimen_comida,
+        inclusiones: datosEditados.inclusiones,
+        precio_promo: datosEditados.precio_promo,
+        promocion: datosEditados.promocion,
+        contacto: datosEditados.contacto,
+        cupos: datosEditados.cupos || 1,
+        activo: true
+      }])
+      .select()
+      .single();
+
+    if (pubErr) throw pubErr;
+
+    await supabase
+      .from('ofertas_borrador')
+      .update({ estado: 'APROBADO' })
+      .eq('id', id);
+
+    res.json({ ok: true, mensaje: 'Oferta validada y publicada con éxito', oferta: ofertaPublicada });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.delete('/api/admin/borrador/:id', async (req, res) => {
+  const { id } = req.params;
+  try {
+    const { error } = await supabase
+      .from('ofertas_borrador')
+      .update({ estado: 'RECHAZADO' })
+      .eq('id', id);
+
+    if (error) throw error;
+    res.json({ ok: true, mensaje: 'Borrador descartado' });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
   }
 });
 
 // ==================================================================
-// 4. CALLBACK DESDE PYTHON (Resultado de Ofertas)
+// 5. CALLBACK DESDE PYTHON (Resultado de Ofertas)
 // ==================================================================
 app.post('/api/webhooks/flyer-completed', async (req, res) => {
   const authHeader = req.headers.authorization;
