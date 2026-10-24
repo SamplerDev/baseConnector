@@ -136,7 +136,7 @@ setInterval(async () => {
 // ==================================================================
 // FUNCIÓN AUXILIAR: Enviar Mensajes a través de Zernio API
 // ==================================================================
-async function sendZernioMessage(target, text) {
+async function sendZernioMessage(target, text, fallbackPhone = null) {
   const isConversationId = typeof target === 'string' && target.length === 24 && !target.startsWith('+');
 
   let endpoint = '';
@@ -177,7 +177,15 @@ async function sendZernioMessage(target, text) {
     log.success('ZERNIO_SEND_OK', `Mensaje entregado a [${target}] en ${duration}ms`, response.data);
     return response.data;
   } catch (err) {
-    log.error('ZERNIO_SEND_ERR', `Falla enviando a [${target}]`, err.response?.data || err.message);
+    const errData = err.response?.data;
+    log.error('ZERNIO_SEND_ERR', `Falla enviando a [${target}]`, errData || err.message);
+
+    // Si falló por CONVERSATION_NOT_FOUND y tenemos el número de teléfono, reintentamos con participantId
+    if (isConversationId && (errData?.code === 'CONVERSATION_NOT_FOUND' || err.response?.status === 404)) {
+      const phoneToUse = fallbackPhone || target;
+      log.warn('ZERNIO_FALLBACK', `Reintentando envío a través de participantId (teléfono: ${phoneToUse})...`);
+      return sendZernioMessage(phoneToUse, text);
+    }
   }
 }
 
@@ -425,7 +433,7 @@ app.post('/webhook', verifyZernioSignature, async (req, res) => {
           log.info('ADMIN_FLYER', `Nueva promo/flyer recibida de Admin (${fromNumber})...`);
 
           const targetId = conversationId || fromNumber;
-          await sendZernioMessage(targetId, "⏳ *Analizando afiche con IA (Buscando ofertas)...*");
+          await sendZernioMessage(targetId, "⏳ *Analizando afiche con IA (Buscando ofertas)...*", fromNumber);
 
           let imageBase64 = null;
           let mimeType = 'image/jpeg';
@@ -489,7 +497,7 @@ app.post('/webhook', verifyZernioSignature, async (req, res) => {
             content: respuestaIA
           }]);
 
-          await sendZernioMessage(conversationId || fromNumber, respuestaIA);
+          await sendZernioMessage(conversationId || fromNumber, respuestaIA, fromNumber);
         }
       }
     } catch (err) {
