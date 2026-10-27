@@ -31,5 +31,9 @@
   },
   "devDependencies": {
     "nodemon": "^3.1.14"
+  },"overrides": {
+    "body-parser": "^2.4.0",
+    "follow-redirects": "^1.16.1",
+    "ip-address": "^10.7.4"
   }
 }
