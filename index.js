@@ -137,6 +137,32 @@ setInterval(async () => {
 // FUNCIÓN AUXILIAR: Enviar Mensajes a través de Zernio API
 // ==================================================================
 async function sendZernioMessage(target, text, fallbackPhone = null) {
+  if (!text) return;
+
+  // Si el texto supera los 3500 caracteres, fraccionar y enviar por partes
+  if (text.length > 3500) {
+    const chunks = splitTextIntoChunks(text, 3500);
+    log.info('ZERNIO_SPLIT', `Mensaje de ${text.length} caracteres dividido en ${chunks.length} partes.`);
+
+    for (let i = 0; i < chunks.length; i++) {
+      const isLastPart = i === chunks.length - 1;
+      const chunkText = `${chunks[i]}${chunks.length > 1 ? `\n\n_(Parte ${i + 1} de ${chunks.length})_` : ''}`;
+
+      await sendSingleZernioMessage(target, chunkText, fallbackPhone);
+
+      // Esperar 800ms entre mensajes para garantizar el orden de entrega en WhatsApp
+      if (!isLastPart) {
+        await new Promise(resolve => setTimeout(resolve, 800));
+      }
+    }
+    return;
+  }
+
+  return await sendSingleZernioMessage(target, text, fallbackPhone);
+}
+
+// Función interna que realiza la Petición HTTP a Zernio
+async function sendSingleZernioMessage(target, text, fallbackPhone = null) {
   const isConversationId = typeof target === 'string' && target.length === 24 && !target.startsWith('+');
 
   let endpoint = '';
@@ -180,11 +206,10 @@ async function sendZernioMessage(target, text, fallbackPhone = null) {
     const errData = err.response?.data;
     log.error('ZERNIO_SEND_ERR', `Falla enviando a [${target}]`, errData || err.message);
 
-    // Si falló por CONVERSATION_NOT_FOUND y tenemos el número de teléfono, reintentamos con participantId
     if (isConversationId && (errData?.code === 'CONVERSATION_NOT_FOUND' || err.response?.status === 404)) {
       const phoneToUse = fallbackPhone || target;
       log.warn('ZERNIO_FALLBACK', `Reintentando envío a través de participantId (teléfono: ${phoneToUse})...`);
-      return sendZernioMessage(phoneToUse, text);
+      return sendSingleZernioMessage(phoneToUse, text);
     }
   }
 }
@@ -344,6 +369,49 @@ async function markMessageAsProcessed(eventId) {
     log.success('DEDUP_MARK_OK', `Evento ${eventId} guardado en mensajes_procesados.`);
   }
 }
+
+function splitTextIntoChunks(text, maxChunkSize = 3500) {
+  if (!text || text.length <= maxChunkSize) return [text];
+
+  const chunks = [];
+  let currentChunk = '';
+  const lines = text.split('\n');
+
+  for (const line of lines) {
+    // Si agregar esta línea supera el límite del fragmento actual
+    if ((currentChunk + '\n' + line).length > maxChunkSize) {
+      if (currentChunk.trim().length > 0) {
+        chunks.push(currentChunk.trim());
+        currentChunk = '';
+      }
+
+      // Si una sola línea/párrafo supera el máximo, dividir por palabras
+      if (line.length > maxChunkSize) {
+        const words = line.split(' ');
+        for (const word of words) {
+          if ((currentChunk + ' ' + word).length > maxChunkSize) {
+            chunks.push(currentChunk.trim());
+            currentChunk = word;
+          } else {
+            currentChunk += (currentChunk ? ' ' : '') + word;
+          }
+        }
+      } else {
+        currentChunk = line;
+      }
+    } else {
+      currentChunk += (currentChunk ? '\n' : '') + line;
+    }
+  }
+
+  if (currentChunk.trim().length > 0) {
+    chunks.push(currentChunk.trim());
+  }
+
+  return chunks;
+}
+
+
 
 // ==================================================================
 // 1. HEALTHCHECK
