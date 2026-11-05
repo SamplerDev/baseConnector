@@ -36,15 +36,14 @@ app.use((req, res, next) => {
 const adminDir = path.resolve(__dirname, '../public/admin');
 const indexPath = path.join(adminDir, 'index.html');
 
-// Log inicial en arranque
 log.info('PATH_CHECK', `Ruta estática admin: ${adminDir}`);
 log.info('PATH_CHECK', `Estado de index.html: ${fs.existsSync(indexPath) ? '✅ EXISTE' : '❌ NO ENCONTRADO'}`);
 
-// Servir archivos estáticos del panel (.js, .css, etc.)
+// Servir archivos estáticos (.js, .css, etc.)
 app.use('/admin', express.static(adminDir));
 
-// Entregar index.html para /admin y /admin/*
-app.get(['/admin', '/admin/*'], (req, res) => {
+// Entregar index.html utilizando Regex para compatibilidad total con Express 5
+app.get(/^\/admin(?:\/.*)?$/, (req, res) => {
   log.info('ADMIN_SERVE', `Sirviendo panel admin desde: ${indexPath}`);
   res.sendFile(indexPath, (err) => {
     if (err) {
