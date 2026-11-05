@@ -37,13 +37,14 @@
         <div id="totpGroup" class="hidden space-y-3 pt-2">
           <!-- Tarjeta del Código QR desplegada en enrolamiento por primera vez -->
           <div id="qrContainer" class="hidden bg-indigo-50 border border-indigo-200 p-4 rounded-xl text-center space-y-2">
-            <p class="text-xs font-bold text-indigo-900">Configuración de Seguridad 2FA</p>
-            <p class="text-xs text-indigo-700">Escanea este código con Google Authenticator o Authy:</p>
-            
-            <div id="qrCodeWrapper" class="flex justify-center py-2 bg-white rounded-lg p-2 border border-indigo-100 max-w-[200px] mx-auto"></div>
-            
-            <p class="text-[10px] text-gray-500 font-mono break-all">Clave manual: <span id="secretCode" class="font-bold text-gray-800"></span></p>
-          </div>
+        <p class="text-xs font-bold text-indigo-900">Configuración de Seguridad 2FA</p>
+        <p class="text-xs text-indigo-700">Escanea este código con Google Authenticator o Authy:</p>
+        
+        <!-- Contenedor adaptativo con overflow oculto y centrado estricto -->
+        <div id="qrCodeWrapper" class="flex justify-center items-center py-2 bg-white rounded-lg p-2 border border-indigo-100 max-w-[200px] mx-auto [&>svg]:w-full [&>svg]:h-auto"></div>
+        
+        <p class="text-[10px] text-gray-500 font-mono break-all">Clave manual: <span id="secretCode" class="font-bold text-gray-800"></span></p>
+        </div>
 
           <div>
             <label class="block text-xs font-semibold text-indigo-600 uppercase mb-1">Código Autenticador (2FA)</label>

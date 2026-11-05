@@ -85,14 +85,27 @@ if (loginForm) {
         // Renderizado adaptativo del QR (SVG directo vs URL Image)
         // Si es la PRIMERA VEZ y el backend envía el código QR
 // Si es la PRIMERA VEZ y el backend envía el código QR
+// Si es la PRIMERA VEZ y el backend envía el código QR
 if (data.isFirstTime && data.qrCode) {
   const qrContainer = document.getElementById('qrContainer');
   const qrCodeWrapper = document.getElementById('qrCodeWrapper');
   const secretCode = document.getElementById('secretCode');
 
   if (qrContainer && qrCodeWrapper) {
-    // Como data.qrCode es una Data URI de texto, se dibuja creando un elemento <img>
-    qrCodeWrapper.innerHTML = `<img src="${data.qrCode}" alt="Código QR 2FA" class="w-44 h-44 object-contain mx-auto">`;
+    qrCodeWrapper.innerHTML = ''; // Limpiar contenido previo
+
+    if (typeof data.qrCode === 'string') {
+      // 1. Buscar si la cadena contiene una etiqueta <svg> ... </svg>
+      const svgMatch = data.qrCode.match(/<svg[\s\S]*<\/svg>/i);
+      
+      if (svgMatch) {
+        // Extraer únicamente el marcado del SVG e inyectarlo limpio
+        qrCodeWrapper.innerHTML = svgMatch[0];
+      } else {
+        // 2. Si es una URL o Data URI sin tag SVG crudo, usar una etiqueta img
+        qrCodeWrapper.innerHTML = `<img src="${data.qrCode}" alt="Código QR 2FA" class="w-44 h-44 object-contain mx-auto">`;
+      }
+    }
 
     if (secretCode) secretCode.innerText = data.secret || '';
     qrContainer.classList.remove('hidden');
