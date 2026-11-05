@@ -34,6 +34,7 @@
   },"overrides": {
     "body-parser": "^2.4.0",
     "follow-redirects": "^1.16.1",
-    "ip-address": "^10.7.4"
+    "ip-address": "^10.7.4",
+    "minimatch": "^11.0.1"
   }
 }
