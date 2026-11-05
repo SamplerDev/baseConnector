@@ -99,7 +99,7 @@ async function login(req, res) {
       secret: enrollData.totp.secret,
       message: 'Escanea el código QR con Google Authenticator o Authy para vincular tu cuenta.'
     });
-    
+
   } catch (err) {
     log.error('ADMIN_LOGIN_CRITICAL', 'Excepción procesando autenticación', err);
     return res.status(500).json({ ok: false, error: 'Error interno en la autenticación.' });
@@ -159,6 +159,8 @@ async function enviarMensajeManual(req, res) {
   }
 }
 
+// src/controllers/adminController.js
+
 async function getBorradores(req, res) {
   try {
     const { data, error } = await supabase
@@ -167,10 +169,16 @@ async function getBorradores(req, res) {
       .eq('estado', 'PENDIENTE')
       .order('created_at', { ascending: false });
 
-    if (error) throw error;
-    res.status(200).json({ ok: true, borradores: data });
+    if (error) {
+      log.error('ADMIN_GET_BORRADORES_DB_ERR', 'Error consultando la tabla ofertas_borrador:', error);
+      return res.status(500).json({ ok: false, error: error.message || 'Error al consultar borradores en base de datos.' });
+    }
+
+    log.success('ADMIN_GET_BORRADORES_OK', `Se obtuvieron ${data?.length || 0} borradores pendientes.`);
+    return res.status(200).json({ ok: true, borradores: data });
   } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
+    log.error('ADMIN_GET_BORRADORES_CRITICAL', 'Excepción crítica en getBorradores:', err);
+    return res.status(500).json({ ok: false, error: err.message || 'Error interno del servidor.' });
   }
 }
 
