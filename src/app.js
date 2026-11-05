@@ -12,7 +12,30 @@ const app = express();
 app.set('trust proxy', 1);
 
 // Seguridad HTTP y Rate Limit
-app.use(helmet());
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: [
+          "'self'",
+          "https://cdn.tailwindcss.com",
+          "https://cdn.jsdelivr.net" // Para cliente Supabase por CDN
+        ],
+        styleSrc: ["'self'", "'unsafe-inline'", "https://cdn.tailwindcss.com"],
+        imgSrc: ["'self'", "data:", "https:"],
+        connectSrc: ["'self'", "https://*.supabase.co", "https://zernio.com"],
+        frameAncestors: ["'none'"], // Evita Clickjacking (no permite iFrames)
+        objectSrc: ["'none'"],
+        upgradeInsecureRequests: [],
+      },
+    },
+    frameguard: { action: 'deny' }, // Anti-Clickjacking
+    noSniff: true, // Prevención de MIME Sniffing
+    xssFilter: true, // Filtro XSS legacy para navegadores antiguos
+    referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
+  })
+);
 app.use(cors());
 app.use(apiLimiter);
 
