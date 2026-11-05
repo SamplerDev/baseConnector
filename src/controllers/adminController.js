@@ -1,0 +1,141 @@
+const supabase = require('../config/db');
+const zernioService = require('../services/zernioService');
+const { procesarRespuestaAdmin } = require('../services/adminService');
+
+async function getConversaciones(req, res) {
+  try {
+    const { data, error } = await supabase
+      .from('conversaciones')
+      .select('*, chat_sesiones(*)')
+      .order('ultimo_mensaje', { ascending: false });
+
+    if (error) throw error;
+    res.status(200).json({ ok: true, conversaciones: data });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+}
+
+async function toggleBot(req, res) {
+  const { phone_number, bot_activo } = req.body;
+  try {
+    const { data, error } = await supabase
+      .from('conversaciones')
+      .update({ bot_activo })
+      .eq('phone_number', phone_number)
+      .select();
+
+    if (error) throw error;
+    res.status(200).json({ ok: true, estado: data });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+}
+
+async function enviarMensajeManual(req, res) {
+  const { phone_number, mensaje } = req.body;
+  try {
+    await zernioService.sendZernioMessage(phone_number, mensaje);
+
+    await supabase.from('chat_sesiones').insert([{
+      phone_number,
+      role: 'human',
+      content: mensaje
+    }]);
+
+    await supabase.from('conversaciones').update({
+      bot_activo: false,
+      ultimo_mensaje: new Date()
+    }).eq('phone_number', phone_number);
+
+    res.status(200).json({ ok: true, mensaje: 'Mensaje enviado manualmente' });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+}
+
+async function getBorradores(req, res) {
+  try {
+    const { data, error } = await supabase
+      .from('ofertas_borrador')
+      .select('*')
+      .eq('estado', 'PENDIENTE')
+      .order('created_at', { ascending: false });
+
+    if (error) throw error;
+    res.status(200).json({ ok: true, borradores: data });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+}
+
+async function aprobarBorrador(req, res) {
+  const { id } = req.params;
+  const datosEditados = req.body;
+
+  try {
+    const { data: ofertaPublicada, error: pubErr } = await supabase
+      .from('ofertas_publicadas')
+      .insert([{
+        destino: datosEditados.destino,
+        fecha_salida: datosEditados.fecha_salida,
+        duracion: datosEditados.duracion,
+        hotel: datosEditados.hotel,
+        regimen_comida: datosEditados.regimen_comida,
+        inclusiones: datosEditados.inclusiones,
+        precio_promo: datosEditados.precio_promo,
+        promocion: datosEditados.promocion,
+        contacto: datosEditados.contacto,
+        cupos: datosEditados.cupos || 1,
+        activo: true
+      }])
+      .select()
+      .single();
+
+    if (pubErr) throw pubErr;
+
+    await supabase
+      .from('ofertas_borrador')
+      .update({ estado: 'APROBADO' })
+      .eq('id', id);
+
+    res.json({ ok: true, mensaje: 'Oferta validada y publicada con éxito', oferta: ofertaPublicada });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+}
+
+async function rechazarBorrador(req, res) {
+  const { id } = req.params;
+  try {
+    const { error } = await supabase
+      .from('ofertas_borrador')
+      .update({ estado: 'RECHAZADO' })
+      .eq('id', id);
+
+    if (error) throw error;
+    res.json({ ok: true, mensaje: 'Borrador descartado' });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+}
+
+async function responderTicketWebhook(req, res) {
+  const { admin_phone, admin_message } = req.body;
+  try {
+    const resultado = await procesarRespuestaAdmin(admin_phone, admin_message);
+    res.status(200).json({ ok: true, ...resultado });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: err.message });
+  }
+}
+
+module.exports = {
+  getConversaciones,
+  toggleBot,
+  enviarMensajeManual,
+  getBorradores,
+  aprobarBorrador,
+  rechazarBorrador,
+  responderTicketWebhook
+};
