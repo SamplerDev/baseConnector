@@ -90,9 +90,9 @@ if (data.isFirstTime && data.qrCode) {
   const secretCode = document.getElementById('secretCode');
 
   if (qrContainer && qrCodeWrapper) {
-    // Supabase entrega la etiqueta <svg...> directamente.
-    // Se asigna directamente a innerHTML sin usar la etiqueta <img>.
-    qrCodeWrapper.innerHTML = data.qrCode;
+    // Como Supabase devuelve una Data URI (data:image/svg+xml;utf8,...), 
+    // la forma correcta de mostrarlo es colocándolo como el src de un elemento <img>.
+    qrCodeWrapper.innerHTML = `<img src="${data.qrCode}" alt="Código QR 2FA" class="w-48 h-48 object-contain mx-auto">`;
 
     if (secretCode) secretCode.innerText = data.secret || '';
     qrContainer.classList.remove('hidden');
