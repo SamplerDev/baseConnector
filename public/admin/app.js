@@ -84,14 +84,15 @@ if (loginForm) {
 
         // Renderizado adaptativo del QR (SVG directo vs URL Image)
         // Si es la PRIMERA VEZ y el backend envía el código QR
+// Si es la PRIMERA VEZ y el backend envía el código QR
 if (data.isFirstTime && data.qrCode) {
   const qrContainer = document.getElementById('qrContainer');
   const qrCodeWrapper = document.getElementById('qrCodeWrapper');
   const secretCode = document.getElementById('secretCode');
 
   if (qrContainer && qrCodeWrapper) {
-    // Inyección limpia y directa del SVG que devuelve Supabase (sin etiquetas img intermedias)
-    qrCodeWrapper.innerHTML = data.qrCode;
+    // Como data.qrCode es una Data URI de texto, se dibuja creando un elemento <img>
+    qrCodeWrapper.innerHTML = `<img src="${data.qrCode}" alt="Código QR 2FA" class="w-44 h-44 object-contain mx-auto">`;
 
     if (secretCode) secretCode.innerText = data.secret || '';
     qrContainer.classList.remove('hidden');
