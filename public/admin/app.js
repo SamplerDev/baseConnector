@@ -83,21 +83,22 @@ if (loginForm) {
         loginTotp.required = true;
 
         // Renderizado adaptativo del QR (SVG directo vs URL Image)
-        // Si es la PRIMERA VEZ y el backend envía el código QR
-if (data.isFirstTime && data.qrCode) {
-  const qrContainer = document.getElementById('qrContainer');
-  const qrCodeWrapper = document.getElementById('qrCodeWrapper');
-  const secretCode = document.getElementById('secretCode');
+        if (data.isFirstTime && data.qrCode) {
+          const qrContainer = document.getElementById('qrContainer');
+          const qrCodeWrapper = document.getElementById('qrCodeWrapper');
+          const secretCode = document.getElementById('secretCode');
 
-  if (qrContainer && qrCodeWrapper) {
-    // Como Supabase devuelve una Data URI (data:image/svg+xml;utf8,...), 
-    // la forma correcta de mostrarlo es colocándolo como el src de un elemento <img>.
-    qrCodeWrapper.innerHTML = `<img src="${data.qrCode}" alt="Código QR 2FA" class="w-48 h-48 object-contain mx-auto">`;
+          if (qrContainer && qrCodeWrapper) {
+            if (data.qrCode.startsWith('<svg')) {
+              qrCodeWrapper.innerHTML = data.qrCode;
+            } else {
+              qrCodeWrapper.innerHTML = `<img src="${data.qrCode}" alt="Código QR 2FA" class="w-44 h-44 object-contain mx-auto">`;
+            }
 
-    if (secretCode) secretCode.innerText = data.secret || '';
-    qrContainer.classList.remove('hidden');
-  }
-}
+            if (secretCode) secretCode.innerText = data.secret || '';
+            qrContainer.classList.remove('hidden');
+          }
+        }
 
         loginTotp.focus();
         mostrarError(data.message);

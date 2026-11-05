@@ -39,25 +39,20 @@ async function login(req, res) {
     }
 
     const verifiedFactor = factors?.totp?.find(f => f.status === 'verified');
-    const unverifiedFactors = factors?.totp?.filter(f => f.status === 'unverified') || [];
 
-    // Limpiar factores no verificados previos para evitar conflictos de nombres duplicados
-    for (const unvFactor of unverifiedFactors) {
-      await userClient.auth.mfa.unenroll({ factorId: unvFactor.id });
+    // Si ya hay un factor verificado y no vino el código 2FA, pedirlo
+    if (verifiedFactor && !code2FA && !factorId) {
+      return res.json({
+        ok: true,
+        requires2FA: true,
+        isFirstTime: false,
+        factorId: verifiedFactor.id,
+        message: 'Ingresa el código TOTP de 6 dígitos de tu aplicación autenticadora.'
+      });
     }
 
-    // CASO A: Usuario YA tiene 2FA verificado previamente
-    if (verifiedFactor) {
-      if (!code2FA) {
-        return res.json({
-          ok: true,
-          requires2FA: true,
-          isFirstTime: false,
-          factorId: verifiedFactor.id,
-          message: 'Ingresa el código TOTP de 6 dígitos de tu aplicación autenticadora.'
-        });
-      }
-
+    // Si se envió el código para verificar un factor existente
+    if (code2FA && factorId) {
       const { data: challengeData, error: challengeError } = await userClient.auth.mfa.challenge({ factorId });
       if (challengeError) return res.status(400).json({ ok: false, error: 'Error al generar el desafío 2FA.' });
 
@@ -78,32 +73,16 @@ async function login(req, res) {
       });
     }
 
-    // CASO B: PRIMERA VEZ (Enrolamiento 2FA)
-    if (code2FA && factorId) {
-      const { data: challengeData, error: challengeError } = await userClient.auth.mfa.challenge({ factorId });
-      if (challengeError) return res.status(400).json({ ok: false, error: 'Error activando 2FA.' });
-
-      const { data: verifyData, error: verifyError } = await userClient.auth.mfa.verify({
-        factorId,
-        challengeId: challengeData.id,
-        code: code2FA
-      });
-
-      if (verifyError) return res.status(401).json({ ok: false, error: 'Código de verificación 2FA incorrecto.' });
-
-      log.success('ADMIN_MFA_ENROLLED', `2FA vinculado y activado con éxito para: ${email}`);
-      return res.json({
-        ok: true,
-        requires2FA: false,
-        token: verifyData.access_token,
-        user: { id: authData.user.id, email: authData.user.email }
-      });
+    // Si llegamos aquí, es un nuevo enrolamiento: eliminamos cualquier factor TOTP anterior residual
+    const allTotpFactors = factors?.totp || [];
+    for (const factor of allTotpFactors) {
+      await userClient.auth.mfa.unenroll({ factorId: factor.id });
     }
 
-    // Generar Código QR para enrolamiento asignando un friendlyName único
+    // Generar nuevo Código QR de enrolamiento con nombre único basado en timestamp
     const { data: enrollData, error: enrollError } = await userClient.auth.mfa.enroll({ 
       factorType: 'totp',
-      friendlyName: 'Viajecito Admin 2FA'
+      friendlyName: `Viajecito Admin ${Date.now()}`
     });
     
     if (enrollError) {
@@ -120,7 +99,7 @@ async function login(req, res) {
       secret: enrollData.totp.secret,
       message: 'Escanea el código QR con Google Authenticator o Authy para vincular tu cuenta.'
     });
-
+    
   } catch (err) {
     log.error('ADMIN_LOGIN_CRITICAL', 'Excepción procesando autenticación', err);
     return res.status(500).json({ ok: false, error: 'Error interno en la autenticación.' });
