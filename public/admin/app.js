@@ -82,14 +82,19 @@ if (loginForm) {
         totpGroup.classList.remove('hidden');
         loginTotp.required = true;
 
-        // Si es la PRIMERA VEZ, mostrar la tarjeta con el código QR
+        // Renderizado adaptativo del QR (SVG directo vs URL Image)
         if (data.isFirstTime && data.qrCode) {
           const qrContainer = document.getElementById('qrContainer');
           const qrCodeWrapper = document.getElementById('qrCodeWrapper');
           const secretCode = document.getElementById('secretCode');
 
           if (qrContainer && qrCodeWrapper) {
-            qrCodeWrapper.innerHTML = `<img src="${data.qrCode}" alt="Código QR 2FA" class="w-44 h-44 object-contain">`;
+            if (data.qrCode.startsWith('<svg')) {
+              qrCodeWrapper.innerHTML = data.qrCode;
+            } else {
+              qrCodeWrapper.innerHTML = `<img src="${data.qrCode}" alt="Código QR 2FA" class="w-44 h-44 object-contain mx-auto">`;
+            }
+
             if (secretCode) secretCode.innerText = data.secret || '';
             qrContainer.classList.remove('hidden');
           }
@@ -126,7 +131,7 @@ function entrarDashboard(email) {
   if (userEmailSpan) userEmailSpan.innerText = email || 'Admin';
   
   iniciarControlInactividad();
-  cargarBorradores(); // Cargar la lista al acceder
+  cargarBorradores();
 }
 
 function mostrarError(msg) {
@@ -240,7 +245,7 @@ function renderBorradores(lista) {
   `).join('');
 }
 
-// Globalizar funciones llamadas en atributos onclick del HTML
+// Globalizar funciones para event listeners inline del HTML
 window.aprobarBorrador = async function(id) {
   try {
     const payload = {
