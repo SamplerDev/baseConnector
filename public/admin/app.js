@@ -1,15 +1,31 @@
 console.log('🚀 Cliente de Administración (Zero-Keys) inicializado');
 
-// Anti-Clickjacking
+// ==================================================================
+// 1. SEGURIDAD Y CONTROL ANTI-CLICKJACKING / XSS
+// ==================================================================
 if (window.top !== window.self) {
   window.top.location = window.self.location;
 }
 
-// Variables de Estado
+function escapeHtml(unsafe) {
+  if (unsafe === null || unsafe === undefined) return '';
+  if (typeof DOMPurify !== 'undefined') {
+    return DOMPurify.sanitize(String(unsafe));
+  }
+  return String(unsafe)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+// ==================================================================
+// 2. VARIABLES DE ESTADO Y REFERENCIAS DOM
+// ==================================================================
 let authToken = sessionStorage.getItem('admin_token') || null;
 let currentFactorId = null;
 
-// Elementos del DOM
 const loginView = document.getElementById('loginView');
 const dashboardView = document.getElementById('dashboardView');
 const loginForm = document.getElementById('loginForm');
@@ -22,15 +38,17 @@ const loginBtn = document.getElementById('loginBtn');
 const logoutBtn = document.getElementById('logoutBtn');
 const userEmailSpan = document.getElementById('userEmailSpan');
 const borradoresList = document.getElementById('borradoresList');
+const borradoresBadge = document.getElementById('borradoresBadge');
 
-// Comprobar sesión existente al cargar la página
+// ==================================================================
+// 3. CONTROL DE SESIÓN Y LOGIN
+// ==================================================================
 window.addEventListener('DOMContentLoaded', () => {
   if (authToken) {
     entrarDashboard(sessionStorage.getItem('admin_email'));
   }
 });
 
-// Listener del Formulario de Login
 if (loginForm) {
   loginForm.addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -46,7 +64,6 @@ if (loginForm) {
         factorId: currentFactorId
       };
 
-      // Petición al Backend Node.js
       const res = await fetch('/api/admin/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -59,7 +76,7 @@ if (loginForm) {
         throw new Error(data.error || 'Credenciales inválidas.');
       }
 
-      // Si el backend solicita verificación 2FA
+      // Solicitud de 2FA / TOTP desde el Backend
       if (data.requires2FA) {
         currentFactorId = data.factorId;
         totpGroup.classList.remove('hidden');
@@ -71,7 +88,7 @@ if (loginForm) {
         return;
       }
 
-      // Inicio de sesión exitoso
+      // Guardar token y acceder
       authToken = data.token;
       sessionStorage.setItem('admin_token', data.token);
       sessionStorage.setItem('admin_email', data.user.email);
@@ -92,9 +109,10 @@ if (loginForm) {
 function entrarDashboard(email) {
   if (loginView) loginView.classList.add('hidden');
   if (dashboardView) dashboardView.classList.remove('hidden');
-  if (userEmailSpan) userEmailSpan.innerText = email;
+  if (userEmailSpan) userEmailSpan.innerText = email || 'Admin';
   
   iniciarControlInactividad();
+  cargarBorradores(); // Cargar la lista al acceder
 }
 
 function mostrarError(msg) {
@@ -114,27 +132,52 @@ function cerrarSesion() {
 }
 if (logoutBtn) logoutBtn.addEventListener('click', cerrarSesion);
 
-// Control de Inactividad (15 Minutos)
-const INACTIVITY_LIMIT_MS = 15 * 60 * 1000;
-let inactivityTimer;
+// ==================================================================
+// 4. CLIENTE HTTP CENTRALIZADO Y AUTENTICADO
+// ==================================================================
+async function apiFetch(endpoint, options = {}) {
+  if (!authToken) throw new Error('Sesión no autorizada');
+  
+  const headers = {
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${authToken}`,
+    ...options.headers
+  };
+  
+  const response = await fetch(`/api/admin${endpoint}`, { ...options, headers });
+  
+  if (response.status === 401 || response.status === 403) {
+    cerrarSesion();
+    throw new Error('Sesión expirada o token 2FA no válido.');
+  }
 
-function resetInactivityTimer() {
-  clearTimeout(inactivityTimer);
-  if (authToken) {
-    inactivityTimer = setTimeout(() => {
-      alert('🔒 Sesión expirada por inactividad.');
-      cerrarSesion();
-    }, INACTIVITY_LIMIT_MS);
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || 'Error en la petición.');
+  return data;
+}
+
+// ==================================================================
+// 5. GESTIÓN Y RENDERIZADO DE BORRADORES
+// ==================================================================
+async function cargarBorradores() {
+  if (!borradoresList) return;
+  try {
+    borradoresList.innerHTML = '<p class="text-gray-400 text-sm col-span-3 text-center py-10">Cargando borradores pendientes...</p>';
+    const res = await apiFetch('/borradores');
+    const lista = res.borradores || [];
+
+    if (borradoresBadge) borradoresBadge.innerText = lista.length;
+    renderBorradores(lista);
+  } catch (err) {
+    borradoresList.innerHTML = `<p class="text-red-500 text-sm col-span-3 text-center py-10">${escapeHtml(err.message)}</p>`;
   }
 }
 
-function iniciarControlInactividad() {
-  ['mousemove', 'keydown', 'click', 'scroll'].forEach(evt => window.addEventListener(evt, resetInactivityTimer));
-  resetInactivityTimer();
-}
-function renderBorradores(lista, token) {
+function renderBorradores(lista) {
+  if (!borradoresList) return;
+
   if (lista.length === 0) {
-    borradoresList.innerHTML = '<p class="text-gray-500 col-span-3 text-center">No hay borradores pendientes de revisión.</p>';
+    borradoresList.innerHTML = '<p class="text-gray-500 col-span-3 text-center py-10">No hay borradores pendientes de revisión.</p>';
     return;
   }
 
@@ -172,13 +215,61 @@ function renderBorradores(lista, token) {
       </div>
 
       <div class="mt-6 flex space-x-3 pt-4 border-t">
-        <button onclick="aprobarBorrador(${item.id}, '${token}')" class="flex-1 bg-green-600 hover:bg-green-700 text-white py-2 rounded-lg text-sm font-semibold transition">
+        <button onclick="aprobarBorrador(${item.id})" class="flex-1 bg-green-600 hover:bg-green-700 text-white py-2 rounded-lg text-sm font-semibold transition">
           ✅ Aprobar y Publicar
         </button>
-        <button onclick="rechazarBorrador(${item.id}, '${token}')" class="bg-red-100 hover:bg-red-200 text-red-700 px-3 py-2 rounded-lg text-sm font-semibold transition">
+        <button onclick="rechazarBorrador(${item.id})" class="bg-red-100 hover:bg-red-200 text-red-700 px-3 py-2 rounded-lg text-sm font-semibold transition">
           🗑️
         </button>
       </div>
     </div>
   `).join('');
+}
+
+// Globalizar funciones llamadas en atributos onclick del HTML
+window.aprobarBorrador = async function(id) {
+  try {
+    const payload = {
+      destino: document.getElementById(`destino-${id}`).value,
+      fecha_salida: document.getElementById(`fecha-${id}`).value,
+      hotel: document.getElementById(`hotel-${id}`).value,
+      precio_promo: parseFloat(document.getElementById(`precio-${id}`).value),
+      cupos: parseInt(document.getElementById(`cupos-${id}`).value, 10) || 1
+    };
+    await apiFetch(`/aprobar-borrador/${id}`, { method: 'POST', body: JSON.stringify(payload) });
+    cargarBorradores();
+  } catch (err) {
+    alert(`Error al aprobar: ${err.message}`);
+  }
+};
+
+window.rechazarBorrador = async function(id) {
+  if (!confirm('¿Deseas descartar este borrador?')) return;
+  try {
+    await apiFetch(`/borrador/${id}`, { method: 'DELETE' });
+    cargarBorradores();
+  } catch (err) {
+    alert(`Error al rechazar: ${err.message}`);
+  }
+};
+
+// ==================================================================
+// 6. CONTROL DE INACTIVIDAD (15 MINUTOS)
+// ==================================================================
+const INACTIVITY_LIMIT_MS = 15 * 60 * 1000;
+let inactivityTimer;
+
+function resetInactivityTimer() {
+  clearTimeout(inactivityTimer);
+  if (authToken) {
+    inactivityTimer = setTimeout(() => {
+      alert('🔒 Sesión expirada automáticamente por inactividad.');
+      cerrarSesion();
+    }, INACTIVITY_LIMIT_MS);
+  }
+}
+
+function iniciarControlInactividad() {
+  ['mousemove', 'keydown', 'click', 'scroll'].forEach(evt => window.addEventListener(evt, resetInactivityTimer));
+  resetInactivityTimer();
 }

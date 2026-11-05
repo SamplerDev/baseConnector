@@ -3,8 +3,7 @@ const zernioService = require('../services/zernioService');
 const { procesarRespuestaAdmin } = require('../services/adminService');
 const log = require('../utils/logger');
 
-
-exports.login = async (req, res) => {
+async function login(req, res) {
   try {
     const { email, password, code2FA, factorId } = req.body;
 
@@ -79,8 +78,7 @@ exports.login = async (req, res) => {
     log.error('ADMIN_LOGIN_CRITICAL', 'Excepción procesando inicio de sesión', err);
     return res.status(500).json({ ok: false, error: 'Error interno en el servidor de autenticación.' });
   }
-};
-
+}
 
 async function getConversaciones(req, res) {
   try {
@@ -211,6 +209,7 @@ async function responderTicketWebhook(req, res) {
 }
 
 module.exports = {
+  login, // 👈 Se exporta login aquí
   getConversaciones,
   toggleBot,
   enviarMensajeManual,
