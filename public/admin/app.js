@@ -1,41 +1,137 @@
-// ==================================================================
-// 1. SEGURIDAD Y CONTROL DE INACTIVIDAD (15 Minutos)
-// ==================================================================
-const INACTIVITY_LIMIT_MS = 15 * 60 * 1000; // 15 Minutos
-let inactivityTimer;
+console.log('🚀 Cliente de Administración (Zero-Keys) inicializado');
 
-function resetInactivityTimer() {
-  clearTimeout(inactivityTimer);
-  inactivityTimer = setTimeout(() => {
-    alert('🔒 Sesión cerrada automáticamente por inactividad.');
-    cerrarSesionSegura();
-  }, INACTIVITY_LIMIT_MS);
-}
-
-// Monitorizar eventos de interacción del usuario
-['mousemove', 'keydown', 'click', 'scroll'].forEach(event => {
-  window.addEventListener(event, resetInactivityTimer);
-});
-
-async function cerrarSesionSegura() {
-  await supabase.auth.signOut();
-  sessionStorage.clear();
-  location.reload();
-}
-
-// Anti-Clickjacking en JavaScript (Doble Verificación)
+// Anti-Clickjacking
 if (window.top !== window.self) {
   window.top.location = window.self.location;
 }
 
-// ==================================================================
-// 2. RENDERING SEGURO CON DESINFECCIÓN ANTI-XSS
-// ==================================================================
-function escapeHtml(unsafe) {
-  if (!unsafe) return '';
-  return DOMPurify.sanitize(String(unsafe));
+// Variables de Estado
+let authToken = sessionStorage.getItem('admin_token') || null;
+let currentFactorId = null;
+
+// Elementos del DOM
+const loginView = document.getElementById('loginView');
+const dashboardView = document.getElementById('dashboardView');
+const loginForm = document.getElementById('loginForm');
+const loginEmail = document.getElementById('loginEmail');
+const loginPassword = document.getElementById('loginPassword');
+const loginTotp = document.getElementById('loginTotp');
+const totpGroup = document.getElementById('totpGroup');
+const loginError = document.getElementById('loginError');
+const loginBtn = document.getElementById('loginBtn');
+const logoutBtn = document.getElementById('logoutBtn');
+const userEmailSpan = document.getElementById('userEmailSpan');
+const borradoresList = document.getElementById('borradoresList');
+
+// Comprobar sesión existente al cargar la página
+window.addEventListener('DOMContentLoaded', () => {
+  if (authToken) {
+    entrarDashboard(sessionStorage.getItem('admin_email'));
+  }
+});
+
+// Listener del Formulario de Login
+if (loginForm) {
+  loginForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    ocultarError();
+    loginBtn.disabled = true;
+    loginBtn.innerText = 'Autenticando...';
+
+    try {
+      const payload = {
+        email: loginEmail.value.trim(),
+        password: loginPassword.value,
+        code2FA: loginTotp.value.trim() || null,
+        factorId: currentFactorId
+      };
+
+      // Petición al Backend Node.js
+      const res = await fetch('/api/admin/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      const data = await res.json();
+
+      if (!res.ok || !data.ok) {
+        throw new Error(data.error || 'Credenciales inválidas.');
+      }
+
+      // Si el backend solicita verificación 2FA
+      if (data.requires2FA) {
+        currentFactorId = data.factorId;
+        totpGroup.classList.remove('hidden');
+        loginTotp.required = true;
+        loginTotp.focus();
+        mostrarError(data.message);
+        loginBtn.disabled = false;
+        loginBtn.innerText = 'Verificar Código 2FA';
+        return;
+      }
+
+      // Inicio de sesión exitoso
+      authToken = data.token;
+      sessionStorage.setItem('admin_token', data.token);
+      sessionStorage.setItem('admin_email', data.user.email);
+
+      entrarDashboard(data.user.email);
+
+    } catch (err) {
+      mostrarError(err.message);
+    } finally {
+      if (!currentFactorId) {
+        loginBtn.disabled = false;
+        loginBtn.innerText = 'Iniciar Sesión';
+      }
+    }
+  });
 }
 
+function entrarDashboard(email) {
+  if (loginView) loginView.classList.add('hidden');
+  if (dashboardView) dashboardView.classList.remove('hidden');
+  if (userEmailSpan) userEmailSpan.innerText = email;
+  
+  iniciarControlInactividad();
+}
+
+function mostrarError(msg) {
+  if (loginError) {
+    loginError.innerText = msg;
+    loginError.classList.remove('hidden');
+  }
+}
+
+function ocultarError() {
+  if (loginError) loginError.classList.add('hidden');
+}
+
+function cerrarSesion() {
+  sessionStorage.clear();
+  location.reload();
+}
+if (logoutBtn) logoutBtn.addEventListener('click', cerrarSesion);
+
+// Control de Inactividad (15 Minutos)
+const INACTIVITY_LIMIT_MS = 15 * 60 * 1000;
+let inactivityTimer;
+
+function resetInactivityTimer() {
+  clearTimeout(inactivityTimer);
+  if (authToken) {
+    inactivityTimer = setTimeout(() => {
+      alert('🔒 Sesión expirada por inactividad.');
+      cerrarSesion();
+    }, INACTIVITY_LIMIT_MS);
+  }
+}
+
+function iniciarControlInactividad() {
+  ['mousemove', 'keydown', 'click', 'scroll'].forEach(evt => window.addEventListener(evt, resetInactivityTimer));
+  resetInactivityTimer();
+}
 function renderBorradores(lista, token) {
   if (lista.length === 0) {
     borradoresList.innerHTML = '<p class="text-gray-500 col-span-3 text-center">No hay borradores pendientes de revisión.</p>';

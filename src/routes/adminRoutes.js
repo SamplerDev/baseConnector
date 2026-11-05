@@ -4,6 +4,20 @@ const adminController = require('../controllers/adminController');
 const { requireSupabaseAuth } = require('../middlewares/authMiddleware');
 const { auditAdminAction } = require('../middlewares/auditMiddleware');
 
+
+router.post('/login', adminController.login);
+
+// Aplicar Middleware de Autenticación a todas las rutas subsiguientes
+router.use(requireSupabaseAuth);
+
+// Rutas Protegidas (Exigen Bearer Token)
+router.get('/borradores', adminController.getBorradores);
+router.post('/aprobar-borrador/:id', adminController.aprobarBorrador);
+router.delete('/borrador/:id', adminController.rechazarBorrador);
+
+module.exports = router;
+
+
 // Autenticación Supabase (2FA TOTP) y Registro de Auditoría para /api/admin
 router.use(requireSupabaseAuth);
 router.use(auditAdminAction);

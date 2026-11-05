@@ -3,6 +3,36 @@ const env = require('../config/env');
 const supabase = require('../config/db');
 const log = require('../utils/logger');
 
+exports.requireSupabaseAuth = async (req, res, next) => {
+  try {
+    const authHeader = req.headers.authorization;
+
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ ok: false, error: 'Acceso denegado: Token de autorización ausente.' });
+    }
+
+    const token = authHeader.split(' ')[1];
+
+    // Validar el token con Supabase Auth
+    const { data: { user }, error } = await supabase.auth.getUser(token);
+
+    if (error || !user) {
+      log.warn('AUTH_MW_REJECT', `Token inválido o expirado desde IP: ${req.ip}`);
+      return res.status(401).json({ ok: false, error: 'Sesión no válida o expirada. Inicie sesión nuevamente.' });
+    }
+
+    // Inyectar el usuario autenticado en la petición
+    req.user = user;
+    req.accessToken = token;
+
+    next();
+  } catch (err) {
+    log.error('AUTH_MW_CRITICAL', 'Error procesando token JWT', err);
+    return res.status(500).json({ ok: false, error: 'Error interno validando la sesión.' });
+  }
+};
+
+
 // 1. Verificación HMAC para Webhooks entrantes de Zernio
 function verifyZernioSignature(req, res, next) {
   log.info('AUTH_ZERNIO', 'Evaluando firma HMAC del Webhook...');

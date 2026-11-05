@@ -1,6 +1,86 @@
 const supabase = require('../config/db');
 const zernioService = require('../services/zernioService');
 const { procesarRespuestaAdmin } = require('../services/adminService');
+const log = require('../utils/logger');
+
+
+exports.login = async (req, res) => {
+  try {
+    const { email, password, code2FA, factorId } = req.body;
+
+    if (!email || !password) {
+      return res.status(400).json({ ok: false, error: 'Correo electrónico y contraseña requeridos.' });
+    }
+
+    // 1. Validar credenciales primarias en Supabase Auth
+    const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
+      email,
+      password
+    });
+
+    if (authError) {
+      log.warn('ADMIN_LOGIN_FAIL', `Intento fallido para ${email}: ${authError.message}`);
+      return res.status(401).json({ ok: false, error: 'Credenciales inválidas.' });
+    }
+
+    // 2. Comprobar si el usuario tiene activado el doble factor de autenticación (TOTP)
+    const { data: factors, error: factorsError } = await supabase.auth.mfa.listFactors();
+    
+    if (factorsError) {
+      log.error('ADMIN_MFA_ERR', 'Error listando factores MFA', factorsError);
+      return res.status(500).json({ ok: false, error: 'Error verificando 2FA.' });
+    }
+
+    const totpFactor = factors?.totp?.find(f => f.status === 'verified');
+
+    // 3. Si tiene 2FA y no ha enviado el código de 6 dígitos, solicitarlo al cliente
+    if (totpFactor && !code2FA) {
+      return res.json({
+        ok: true,
+        requires2FA: true,
+        factorId: totpFactor.id,
+        message: 'Ingresa el código TOTP de 6 dígitos de tu aplicación autenticadora.'
+      });
+    }
+
+    // 4. Si se proporciona el código 2FA, procesar el Challenge y la Verificación
+    if (totpFactor && code2FA && factorId) {
+      const { data: challengeData, error: challengeError } = await supabase.auth.mfa.challenge({ factorId });
+      
+      if (challengeError) {
+        return res.status(400).json({ ok: false, error: 'No se pudo generar el desafío 2FA.' });
+      }
+
+      const { error: verifyError } = await supabase.auth.mfa.verify({
+        factorId,
+        challengeId: challengeData.id,
+        code: code2FA
+      });
+
+      if (verifyError) {
+        return res.status(401).json({ ok: false, error: 'Código 2FA incorrecto o expirado.' });
+      }
+    }
+
+    log.success('ADMIN_AUTH_SUCCESS', `Sesión iniciada correctamente para: ${email}`);
+
+    // Devolver el Access Token emitido por Supabase Auth
+    return res.json({
+      ok: true,
+      requires2FA: false,
+      token: authData.session.access_token,
+      user: {
+        id: authData.user.id,
+        email: authData.user.email
+      }
+    });
+
+  } catch (err) {
+    log.error('ADMIN_LOGIN_CRITICAL', 'Excepción procesando inicio de sesión', err);
+    return res.status(500).json({ ok: false, error: 'Error interno en el servidor de autenticación.' });
+  }
+};
+
 
 async function getConversaciones(req, res) {
   try {
