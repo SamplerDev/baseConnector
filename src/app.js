@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
+const fs = require('fs'); // 👈 1. Importar el módulo de sistema de archivos
 const helmet = require('helmet');
 const apiLimiter = require('./middlewares/rateLimiter');
 const routes = require('./routes');
@@ -8,76 +9,64 @@ const log = require('./utils/logger');
 
 const app = express();
 
-// Confiar en proxy de Hostinger (LiteSpeed)
 app.set('trust proxy', 1);
 
-// Seguridad HTTP y Rate Limit (Helmet CSP Completo)
-app.use(
-  helmet({
-    contentSecurityPolicy: {
-      directives: {
-        defaultSrc: ["'self'"],
-        scriptSrc: [
-          "'self'",
-          "https://cdn.tailwindcss.com",
-          "https://cdn.jsdelivr.net" // Para cliente Supabase y DOMPurify por CDN
-        ],
-        styleSrc: ["'self'", "'unsafe-inline'", "https://cdn.tailwindcss.com"],
-        imgSrc: ["'self'", "data:", "https:"],
-        connectSrc: ["'self'", "https://*.supabase.co", "https://zernio.com"],
-        frameAncestors: ["'none'"], // Evita Clickjacking (no permite iFrames)
-        objectSrc: ["'none'"],
-        upgradeInsecureRequests: [],
-      },
-    },
-    frameguard: { action: 'deny' }, // Anti-Clickjacking
-    noSniff: true, // Prevención de MIME Sniffing
-    xssFilter: true, // Filtro XSS legacy para navegadores antiguos
-    referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
-  })
-);
+// Seguridad y Middlewares
+app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors());
 app.use(apiLimiter);
-
-// Guardar buffer crudo para la validación HMAC de Zernio
 app.use(express.json({
   limit: '15mb',
-  verify: (req, res, buf) => {
-    req.rawBody = buf;
-  }
+  verify: (req, res, buf) => { req.rawBody = buf; }
 }));
 
-// Logger de tráfico HTTP
+// Logger HTTP Global
 app.use((req, res, next) => {
   const start = Date.now();
   log.info('HTTP_IN', `--> ${req.method} ${req.url} [IP: ${req.ip}]`);
-
   res.on('finish', () => {
-    const duration = Date.now() - start;
-    log.info('HTTP_OUT', `<-- ${req.method} ${req.url} ${res.statusCode} [${duration}ms]`);
+    log.info('HTTP_OUT', `<-- ${req.method} ${req.url} ${res.statusCode} [${Date.now() - start}ms]`);
   });
   next();
 });
 
-// ------------------------------------------------------------------
-// CONFIGURACIÓN DE ARCHIVOS ESTÁTICOS PARA EL PANEL ADMIN (public/admin)
-// ------------------------------------------------------------------
+// ==================================================================
+// DIAGNÓSTICO DE RUTA Y ARCHIVOS ESTÁTICOS (/admin)
+// ==================================================================
 const adminDir = path.resolve(__dirname, '../public/admin');
+const indexPath = path.join(adminDir, 'index.html');
 
-// 1. Servir los archivos estáticos de /public/admin bajo la ruta /admin
+// 🔍 LOG 1: Verificar en consola si el archivo existe físicamente al arrancar
+log.info('PATH_CHECK', `Ruta absoluta buscada: ${adminDir}`);
+log.info('PATH_CHECK', `¿Existe index.html en esa carpeta?: ${fs.existsSync(indexPath) ? '✅ SÍ' : '❌ NO'}`);
+
+// 🔍 LOG 2: Middleware de rastreo para peticiones hacia /admin
+app.use('/admin', (req, res, next) => {
+  log.info('ADMIN_TRACE', `Petición detectada hacia /admin | path: "${req.path}" | originalUrl: "${req.originalUrl}"`);
+  next();
+});
+
+// 1. Servir archivos estáticos (app.js, CSS, etc.)
 app.use('/admin', express.static(adminDir));
 
-// 2. Fallback para entregar index.html al navegar a /admin o /admin/
-app.get('/admin*', (req, res) => {
-  res.sendFile(path.join(adminDir, 'index.html'), (err) => {
+// 2. Servir el index.html
+app.get(['/admin', '/admin/*'], (req, res) => {
+  log.info('ADMIN_SERVE', `Intentando enviar index.html desde: ${indexPath}`);
+
+  res.sendFile(indexPath, (err) => {
     if (err) {
-      log.error('ADMIN_STATIC_ERR', `No se encontró index.html en: ${adminDir}`, err);
-      res.status(404).send('Error: No se encontró la vista del panel administrativo.');
+      // 🔍 LOG 3: Capturar el error exacto si Express falla al leer o entregar el archivo
+      log.error('ADMIN_SERVE_ERR', `Error leyendo/enviando el archivo index.html`, err);
+      if (!res.headersSent) {
+        res.status(404).send(`Error de Diagnóstico: No se pudo entregar el archivo en ${indexPath}`);
+      }
+    } else {
+      log.success('ADMIN_SERVE_OK', `index.html entregado con éxito.`);
     }
   });
 });
 
-// Montar Rutas de la Aplicación
+// Montar el resto de las rutas
 app.use('/', routes);
 
 module.exports = app;
