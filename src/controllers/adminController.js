@@ -1,3 +1,5 @@
+const { createClient } = require('@supabase/supabase-js');
+const env = require('../config/env');
 const supabase = require('../config/db');
 const zernioService = require('../services/zernioService');
 const { procesarRespuestaAdmin } = require('../services/adminService');
@@ -22,7 +24,7 @@ async function login(req, res) {
       return res.status(401).json({ ok: false, error: 'Credenciales inválidas.' });
     }
 
-    // Crear instancia aislada con el token del usuario para operar en su contexto de MFA
+    // Instancia temporal con el token del usuario para consultar MFA
     const userClient = createClient(env.SUPABASE_URL, env.SUPABASE_KEY, {
       auth: { persistSession: false },
       global: { headers: { Authorization: `Bearer ${authData.session.access_token}` } }
@@ -37,9 +39,7 @@ async function login(req, res) {
 
     const verifiedFactor = factors?.totp?.find(f => f.status === 'verified');
 
-    // ------------------------------------------------------------------
-    // CASO A: El usuario YA tiene 2FA verificado previamente
-    // ------------------------------------------------------------------
+    // CASO A: Usuario YA tiene 2FA verificado
     if (verifiedFactor) {
       if (!code2FA) {
         return res.json({
@@ -66,16 +66,12 @@ async function login(req, res) {
       return res.json({
         ok: true,
         requires2FA: false,
-        token: verifyData.access_token, // Token AAL2 elevado
+        token: verifyData.access_token,
         user: { id: authData.user.id, email: authData.user.email }
       });
     }
 
-    // ------------------------------------------------------------------
     // CASO B: PRIMERA VEZ (Enrolamiento 2FA)
-    // ------------------------------------------------------------------
-    
-    // B1. Si el usuario ya vio el QR y acaba de enviar el código de 6 dígitos
     if (code2FA && factorId) {
       const { data: challengeData, error: challengeError } = await userClient.auth.mfa.challenge({ factorId });
       if (challengeError) return res.status(400).json({ ok: false, error: 'Error activando 2FA.' });
@@ -92,12 +88,12 @@ async function login(req, res) {
       return res.json({
         ok: true,
         requires2FA: false,
-        token: verifyData.access_token, // Token AAL2 elevado
+        token: verifyData.access_token,
         user: { id: authData.user.id, email: authData.user.email }
       });
     }
 
-    // B2. Generar el Código QR de Enrolamiento para mostrar en pantalla
+    // Generar Código QR para enrolamiento
     const { data: enrollData, error: enrollError } = await userClient.auth.mfa.enroll({ factorType: 'totp' });
     if (enrollError) {
       log.error('ADMIN_ENROLL_ERR', 'Error generando QR de 2FA', enrollError);
@@ -120,6 +116,7 @@ async function login(req, res) {
   }
 }
 
+// RESTO DE FUNCIONES DEL CONTROLADOR
 async function getConversaciones(req, res) {
   try {
     const { data, error } = await supabase
@@ -249,7 +246,7 @@ async function responderTicketWebhook(req, res) {
 }
 
 module.exports = {
-  login, // 👈 Se exporta login aquí
+  login,
   getConversaciones,
   toggleBot,
   enviarMensajeManual,
