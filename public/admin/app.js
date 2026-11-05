@@ -84,26 +84,32 @@ if (loginForm) {
 
         // Renderizado adaptativo del QR (SVG directo vs URL Image)
         // Si es la PRIMERA VEZ y el backend envía el código QR
-// Si es la PRIMERA VEZ y el backend envía el código QR
-// Si es la PRIMERA VEZ y el backend envía el código QR
 if (data.isFirstTime && data.qrCode) {
   const qrContainer = document.getElementById('qrContainer');
   const qrCodeWrapper = document.getElementById('qrCodeWrapper');
   const secretCode = document.getElementById('secretCode');
 
   if (qrContainer && qrCodeWrapper) {
-    qrCodeWrapper.innerHTML = ''; // Limpiar contenido previo
+    qrCodeWrapper.innerHTML = '';
 
     if (typeof data.qrCode === 'string') {
-      // 1. Buscar si la cadena contiene una etiqueta <svg> ... </svg>
       const svgMatch = data.qrCode.match(/<svg[\s\S]*<\/svg>/i);
       
       if (svgMatch) {
-        // Extraer únicamente el marcado del SVG e inyectarlo limpio
-        qrCodeWrapper.innerHTML = svgMatch[0];
+        let svgClean = svgMatch[0];
+
+        // 🔑 SOLUCIÓN: Asegurar viewBox para que NUNCA se corten los bordes del QR
+        if (!svgClean.includes('viewBox')) {
+          svgClean = svgClean.replace('<svg', '<svg viewBox="0 0 219 219"');
+        }
+        
+        // Forzar ancho y alto responsive eliminando dimensiones rígidas
+        svgClean = svgClean.replace(/width="\d+"/, 'width="100%"')
+                           .replace(/height="\d+"/, 'height="100%"');
+
+        qrCodeWrapper.innerHTML = svgClean;
       } else {
-        // 2. Si es una URL o Data URI sin tag SVG crudo, usar una etiqueta img
-        qrCodeWrapper.innerHTML = `<img src="${data.qrCode}" alt="Código QR 2FA" class="w-44 h-44 object-contain mx-auto">`;
+        qrCodeWrapper.innerHTML = `<img src="${data.qrCode}" alt="Código QR 2FA" class="w-48 h-48 object-contain mx-auto">`;
       }
     }
 
