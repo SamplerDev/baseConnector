@@ -31,6 +31,7 @@ async function login(req, res) {
     });
 
     // 2. Consultar factores 2FA del usuario
+    // 2. Consultar factores 2FA del usuario
     const { data: factors, error: factorsError } = await userClient.auth.mfa.listFactors();
     if (factorsError) {
       log.error('ADMIN_MFA_ERR', 'Error consultando factores 2FA', factorsError);
@@ -38,8 +39,14 @@ async function login(req, res) {
     }
 
     const verifiedFactor = factors?.totp?.find(f => f.status === 'verified');
+    const unverifiedFactors = factors?.totp?.filter(f => f.status === 'unverified') || [];
 
-    // CASO A: Usuario YA tiene 2FA verificado
+    // Limpiar factores no verificados previos para evitar conflictos de nombres duplicados
+    for (const unvFactor of unverifiedFactors) {
+      await userClient.auth.mfa.unenroll({ factorId: unvFactor.id });
+    }
+
+    // CASO A: Usuario YA tiene 2FA verificado previamente
     if (verifiedFactor) {
       if (!code2FA) {
         return res.json({
@@ -93,8 +100,12 @@ async function login(req, res) {
       });
     }
 
-    // Generar Código QR para enrolamiento
-    const { data: enrollData, error: enrollError } = await userClient.auth.mfa.enroll({ factorType: 'totp' });
+    // Generar Código QR para enrolamiento asignando un friendlyName único
+    const { data: enrollData, error: enrollError } = await userClient.auth.mfa.enroll({ 
+      factorType: 'totp',
+      friendlyName: 'Viajecito Admin 2FA'
+    });
+    
     if (enrollError) {
       log.error('ADMIN_ENROLL_ERR', 'Error generando QR de 2FA', enrollError);
       return res.status(500).json({ ok: false, error: 'No se pudo generar el código QR para 2FA.' });
