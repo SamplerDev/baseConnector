@@ -76,19 +76,33 @@ if (loginForm) {
         throw new Error(data.error || 'Credenciales inválidas.');
       }
 
-      // Solicitud de 2FA / TOTP desde el Backend
+      // Si requiere 2FA (Primera vez o subsecuente)
       if (data.requires2FA) {
         currentFactorId = data.factorId;
         totpGroup.classList.remove('hidden');
         loginTotp.required = true;
+
+        // Si es la PRIMERA VEZ, mostrar la tarjeta con el código QR
+        if (data.isFirstTime && data.qrCode) {
+          const qrContainer = document.getElementById('qrContainer');
+          const qrCodeWrapper = document.getElementById('qrCodeWrapper');
+          const secretCode = document.getElementById('secretCode');
+
+          if (qrContainer && qrCodeWrapper) {
+            qrCodeWrapper.innerHTML = `<img src="${data.qrCode}" alt="Código QR 2FA" class="w-44 h-44 object-contain">`;
+            if (secretCode) secretCode.innerText = data.secret || '';
+            qrContainer.classList.remove('hidden');
+          }
+        }
+
         loginTotp.focus();
         mostrarError(data.message);
         loginBtn.disabled = false;
-        loginBtn.innerText = 'Verificar Código 2FA';
+        loginBtn.innerText = 'Verificar y Enlazar 2FA';
         return;
       }
 
-      // Guardar token y acceder
+      // Inicio de sesión exitoso (Sesión AAL2 obtenida)
       authToken = data.token;
       sessionStorage.setItem('admin_token', data.token);
       sessionStorage.setItem('admin_email', data.user.email);

@@ -11,7 +11,7 @@ async function login(req, res) {
       return res.status(400).json({ ok: false, error: 'Correo electrónico y contraseña requeridos.' });
     }
 
-    // 1. Validar credenciales primarias en Supabase Auth
+    // 1. Validar correo y contraseña (Obtener sesión AAL1)
     const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
       email,
       password
@@ -22,61 +22,101 @@ async function login(req, res) {
       return res.status(401).json({ ok: false, error: 'Credenciales inválidas.' });
     }
 
-    // 2. Comprobar si el usuario tiene activado el doble factor de autenticación (TOTP)
-    const { data: factors, error: factorsError } = await supabase.auth.mfa.listFactors();
-    
+    // Crear instancia aislada con el token del usuario para operar en su contexto de MFA
+    const userClient = createClient(env.SUPABASE_URL, env.SUPABASE_KEY, {
+      auth: { persistSession: false },
+      global: { headers: { Authorization: `Bearer ${authData.session.access_token}` } }
+    });
+
+    // 2. Consultar factores 2FA del usuario
+    const { data: factors, error: factorsError } = await userClient.auth.mfa.listFactors();
     if (factorsError) {
-      log.error('ADMIN_MFA_ERR', 'Error listando factores MFA', factorsError);
-      return res.status(500).json({ ok: false, error: 'Error verificando 2FA.' });
+      log.error('ADMIN_MFA_ERR', 'Error consultando factores 2FA', factorsError);
+      return res.status(500).json({ ok: false, error: 'Error verificando estado 2FA.' });
     }
 
-    const totpFactor = factors?.totp?.find(f => f.status === 'verified');
+    const verifiedFactor = factors?.totp?.find(f => f.status === 'verified');
 
-    // 3. Si tiene 2FA y no ha enviado el código de 6 dígitos, solicitarlo al cliente
-    if (totpFactor && !code2FA) {
-      return res.json({
-        ok: true,
-        requires2FA: true,
-        factorId: totpFactor.id,
-        message: 'Ingresa el código TOTP de 6 dígitos de tu aplicación autenticadora.'
-      });
-    }
-
-    // 4. Si se proporciona el código 2FA, procesar el Challenge y la Verificación
-    if (totpFactor && code2FA && factorId) {
-      const { data: challengeData, error: challengeError } = await supabase.auth.mfa.challenge({ factorId });
-      
-      if (challengeError) {
-        return res.status(400).json({ ok: false, error: 'No se pudo generar el desafío 2FA.' });
+    // ------------------------------------------------------------------
+    // CASO A: El usuario YA tiene 2FA verificado previamente
+    // ------------------------------------------------------------------
+    if (verifiedFactor) {
+      if (!code2FA) {
+        return res.json({
+          ok: true,
+          requires2FA: true,
+          isFirstTime: false,
+          factorId: verifiedFactor.id,
+          message: 'Ingresa el código TOTP de 6 dígitos de tu aplicación autenticadora.'
+        });
       }
 
-      const { error: verifyError } = await supabase.auth.mfa.verify({
+      const { data: challengeData, error: challengeError } = await userClient.auth.mfa.challenge({ factorId });
+      if (challengeError) return res.status(400).json({ ok: false, error: 'Error al generar el desafío 2FA.' });
+
+      const { data: verifyData, error: verifyError } = await userClient.auth.mfa.verify({
         factorId,
         challengeId: challengeData.id,
         code: code2FA
       });
 
-      if (verifyError) {
-        return res.status(401).json({ ok: false, error: 'Código 2FA incorrecto o expirado.' });
-      }
+      if (verifyError) return res.status(401).json({ ok: false, error: 'Código 2FA incorrecto o expirado.' });
+
+      log.success('ADMIN_AUTH_SUCCESS', `Login 2FA completado para: ${email}`);
+      return res.json({
+        ok: true,
+        requires2FA: false,
+        token: verifyData.access_token, // Token AAL2 elevado
+        user: { id: authData.user.id, email: authData.user.email }
+      });
     }
 
-    log.success('ADMIN_AUTH_SUCCESS', `Sesión iniciada correctamente para: ${email}`);
+    // ------------------------------------------------------------------
+    // CASO B: PRIMERA VEZ (Enrolamiento 2FA)
+    // ------------------------------------------------------------------
+    
+    // B1. Si el usuario ya vio el QR y acaba de enviar el código de 6 dígitos
+    if (code2FA && factorId) {
+      const { data: challengeData, error: challengeError } = await userClient.auth.mfa.challenge({ factorId });
+      if (challengeError) return res.status(400).json({ ok: false, error: 'Error activando 2FA.' });
 
-    // Devolver el Access Token emitido por Supabase Auth
+      const { data: verifyData, error: verifyError } = await userClient.auth.mfa.verify({
+        factorId,
+        challengeId: challengeData.id,
+        code: code2FA
+      });
+
+      if (verifyError) return res.status(401).json({ ok: false, error: 'Código de verificación 2FA incorrecto.' });
+
+      log.success('ADMIN_MFA_ENROLLED', `2FA vinculado y activado con éxito para: ${email}`);
+      return res.json({
+        ok: true,
+        requires2FA: false,
+        token: verifyData.access_token, // Token AAL2 elevado
+        user: { id: authData.user.id, email: authData.user.email }
+      });
+    }
+
+    // B2. Generar el Código QR de Enrolamiento para mostrar en pantalla
+    const { data: enrollData, error: enrollError } = await userClient.auth.mfa.enroll({ factorType: 'totp' });
+    if (enrollError) {
+      log.error('ADMIN_ENROLL_ERR', 'Error generando QR de 2FA', enrollError);
+      return res.status(500).json({ ok: false, error: 'No se pudo generar el código QR para 2FA.' });
+    }
+
     return res.json({
       ok: true,
-      requires2FA: false,
-      token: authData.session.access_token,
-      user: {
-        id: authData.user.id,
-        email: authData.user.email
-      }
+      requires2FA: true,
+      isFirstTime: true,
+      factorId: enrollData.id,
+      qrCode: enrollData.totp.qr_code,
+      secret: enrollData.totp.secret,
+      message: 'Escanea el código QR con Google Authenticator o Authy para vincular tu cuenta.'
     });
 
   } catch (err) {
-    log.error('ADMIN_LOGIN_CRITICAL', 'Excepción procesando inicio de sesión', err);
-    return res.status(500).json({ ok: false, error: 'Error interno en el servidor de autenticación.' });
+    log.error('ADMIN_LOGIN_CRITICAL', 'Excepción procesando autenticación', err);
+    return res.status(500).json({ ok: false, error: 'Error interno en la autenticación.' });
   }
 }
 
