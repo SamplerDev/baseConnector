@@ -167,7 +167,7 @@ async function getBorradores(req, res) {
       .from('ofertas_borrador')
       .select('*')
       .eq('estado', 'PENDIENTE')
-      .order('created_at', { ascending: false });
+      .order('creado_el', { ascending: false });
 
     if (error) {
       log.error('ADMIN_GET_BORRADORES_DB_ERR', 'Error consultando la tabla ofertas_borrador:', error);
